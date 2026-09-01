@@ -1,44 +1,36 @@
 <script>
   import { submitJob, listModels, ApiError } from "./api.js";
 
-  /** @type {(job: any) => void} */
-  export let onSubmitted;
+  let { onSubmitted = () => {} } = $props();
 
-  let file = null;
-  let filename = "";
-  let models = ["tiny", "base", "small", "medium", "large-v3", "distil-large-v3"];
-  let model = "tiny";
-  let language = "ko";
-  let device = "auto";
-  let computeType = "auto";
-  let noiseDb = -30.0;
-  let minSilence = 1.5;
-  let margin = 0.2;
-  let noSilence = false;
-  let noSubtitles = false;
-  let projectName = "Auto Edit";
-  let eventName = "veauto";
-  let submitting = false;
-  let error = "";
+  let file = $state(null);
+  let filename = $state("");
+  let model = $state("tiny");
+  let language = $state("ko");
+  let device = $state("auto");
+  let computeType = $state("auto");
+  let noiseDb = $state(-30.0);
+  let minSilence = $state(1.5);
+  let margin = $state(0.2);
+  let noSilence = $state(false);
+  let noSubtitles = $state(false);
+  let projectName = $state("Auto Edit");
+  let eventName = $state("veauto");
+  let submitting = $state(false);
+  let error = $state("");
 
-  // Best-effort model refresh (backend exposes /api/config/models? but
-  // we keep a local list as fallback for offline / first-load).
-  let modelListTried = false;
+  let models = $state(["tiny", "base", "small", "medium", "large-v3", "distil-large-v3"]);
+
   async function refreshModels() {
     try {
       const remote = await listModels();
       if (Array.isArray(remote) && remote.length) {
         models = remote;
       }
-    } catch (e) {
-      // ignore — keep static list
-    } finally {
-      modelListTried = true;
-    }
+    } catch (_e) { /* keep static list */ }
   }
   refreshModels();
 
-  /** @param {Event} e */
   function onFile(e) {
     const t = e.target;
     if (t.files && t.files.length) {
@@ -47,201 +39,168 @@
     }
   }
 
-  /** @param {DragEvent} e */
   function onDrop(e) {
     e.preventDefault();
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+    if (e.dataTransfer.files && e.dataTransfer.files.length) {
       file = e.dataTransfer.files[0];
       filename = file.name;
     }
   }
-  function onDragOver(e) {
-    e.preventDefault();
-  }
+  function onDragOver(e) { e.preventDefault(); }
 
-  async function submit() {
+  async function onSubmit(e) {
+    e.preventDefault();
     if (!file || submitting) return;
-    submitting = true;
     error = "";
+    submitting = true;
     try {
-      const job = await submitJob({
-        file,
-        model,
-        language,
-        device,
-        computeType,
-        noiseDb,
-        minSilence,
-        margin,
-        noSilence,
-        noSubtitles,
-        projectName,
-        eventName,
+      const job = await submitJob(file, {
+        model, language, device, compute_type: computeType,
+        noise_db: noiseDb, min_silence: minSilence, margin,
+        no_silence: noSilence, no_subtitles: noSubtitles,
+        project_name: projectName, event_name: eventName,
       });
       onSubmitted(job);
-      // reset
+      // Reset file input but keep options
       file = null;
       filename = "";
+      const input = document.getElementById("file-input");
+      if (input) input.value = "";
     } catch (e) {
-      if (e instanceof ApiError) {
-        error = e.message;
-      } else {
-        error = String(e);
-      }
+      error = e instanceof ApiError
+        ? `API error: ${e.status} ${e.body || e.statusText}`
+        : `Submit failed: ${e?.message || e}`;
     } finally {
       submitting = false;
     }
   }
 </script>
 
-<section class="upload-card card">
-  <h2>Upload &amp; submit</h2>
-  <p class="muted">
-    Drop a video file or pick one. The pipeline will run in the background;
-    you can submit more files while it processes.
-  </p>
+<section class="card">
+  <h2>New job</h2>
+  <form onsubmit={onSubmit}>
+    <div
+      class="dropzone"
+      class:has-file={!!filename}
+      ondrop={onDrop}
+      ondragover={onDragOver}
+      role="button"
+      tabindex="0"
+    >
+      <input id="file-input" type="file" accept="video/*,audio/*" onchange={onFile} />
+      <p class="dz-text">
+        {#if filename}
+          <strong>{filename}</strong>
+        {:else}
+          Drag &amp; drop a video, or
+          <label for="file-input" class="link">browse</label>
+        {/if}
+      </p>
+    </div>
 
-  <div
-    class="dropzone"
-    class:active={filename}
-    on:drop={onDrop}
-    on:dragover={onDragOver}
-    role="region"
-    aria-label="File drop zone"
-  >
-    {#if filename}
-      <strong>📄 {filename}</strong>
-    {:else}
-      <span>Drop a video here, or pick one below</span>
+    <details>
+      <summary>Options</summary>
+      <div class="grid">
+        <label>Model
+          <select bind:value={model}>
+            {#each models as m}<option value={m}>{m}</option>{/each}
+          </select>
+        </label>
+        <label>Language
+          <input type="text" bind:value={language} placeholder="ko / en / auto" />
+        </label>
+        <label>Device
+          <select bind:value={device}>
+            <option value="auto">auto</option>
+            <option value="cpu">cpu</option>
+            <option value="cuda">cuda</option>
+            <option value="mps">mps</option>
+          </select>
+        </label>
+        <label>Compute type
+          <select bind:value={computeType}>
+            <option value="auto">auto</option>
+            <option value="int8">int8</option>
+            <option value="int8_float16">int8_float16</option>
+            <option value="float16">float16</option>
+            <option value="float32">float32</option>
+          </select>
+        </label>
+        <label>Noise (dB)
+          <input type="number" step="1" bind:value={noiseDb} />
+        </label>
+        <label>Min silence (s)
+          <input type="number" step="0.1" min="0.1" bind:value={minSilence} />
+        </label>
+        <label>Margin (s)
+          <input type="number" step="0.05" min="0" bind:value={margin} />
+        </label>
+        <label>Project name
+          <input type="text" bind:value={projectName} />
+        </label>
+        <label>Event name
+          <input type="text" bind:value={eventName} />
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={noSilence} /> Skip silence removal
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={noSubtitles} /> Skip subtitles
+        </label>
+      </div>
+    </details>
+
+    {#if error}
+      <p class="error">{error}</p>
     {/if}
-    <input type="file" accept="video/*,audio/*" on:change={onFile} />
-  </div>
 
-  <div class="grid">
-    <label>
-      <span>Whisper model</span>
-      <select bind:value={model} disabled={submitting}>
-        {#each models as m}
-          <option value={m}>{m}</option>
-        {/each}
-      </select>
-    </label>
-    <label>
-      <span>Language</span>
-      <input type="text" bind:value={language} placeholder="ko / en / …" disabled={submitting} />
-    </label>
-    <label>
-      <span>Device</span>
-      <select bind:value={device} disabled={submitting}>
-        <option value="auto">auto</option>
-        <option value="cpu">cpu</option>
-        <option value="cuda">cuda</option>
-        <option value="mps">mps</option>
-      </select>
-    </label>
-    <label>
-      <span>Compute type</span>
-      <select bind:value={computeType} disabled={submitting}>
-        <option value="auto">auto</option>
-        <option value="int8">int8</option>
-        <option value="int8_float16">int8_float16</option>
-        <option value="float16">float16</option>
-        <option value="float32">float32</option>
-      </select>
-    </label>
-    <label>
-      <span>Noise dB</span>
-      <input type="number" step="1" bind:value={noiseDb} disabled={submitting || noSilence} />
-    </label>
-    <label>
-      <span>Min silence (s)</span>
-      <input type="number" step="0.1" min="0.1" bind:value={minSilence} disabled={submitting || noSilence} />
-    </label>
-    <label>
-      <span>Margin (s)</span>
-      <input type="number" step="0.05" min="0" bind:value={margin} disabled={submitting || noSilence} />
-    </label>
-    <label class="check">
-      <input type="checkbox" bind:checked={noSilence} disabled={submitting} />
-      <span>Skip silence removal</span>
-    </label>
-    <label class="check">
-      <input type="checkbox" bind:checked={noSubtitles} disabled={submitting} />
-      <span>Skip subtitles</span>
-    </label>
-    <label>
-      <span>Project name</span>
-      <input type="text" bind:value={projectName} disabled={submitting} />
-    </label>
-    <label>
-      <span>Event name</span>
-      <input type="text" bind:value={eventName} disabled={submitting} />
-    </label>
-  </div>
-
-  {#if error}
-    <p class="error">⚠ {error}</p>
-  {/if}
-
-  <button
-    class="primary"
-    on:click={submit}
-    disabled={!file || submitting}
-  >
-    {submitting ? "Uploading…" : "Submit job"}
-  </button>
+    <button class="primary" type="submit" disabled={!file || submitting}>
+      {submitting ? "Submitting…" : "Submit job"}
+    </button>
+  </form>
 </section>
 
 <style>
-  .dropzone {
-    border: 2px dashed var(--border);
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 1.2rem;
+    margin-bottom: 1.5rem;
+  }
+  h2 { margin: 0 0 0.8rem; font-size: 1.1rem; }
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 6px;
+    padding: 1.5rem;
     text-align: center;
-    background: var(--bg-alt);
-    margin: 0.8rem 0;
-    position: relative;
+    transition: border-color 0.2s;
+    background: var(--bg);
   }
-  .dropzone.active {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, var(--bg-alt));
-  }
-  .dropzone input[type="file"] {
-    display: block;
-    margin: 0.6rem auto 0;
-  }
+  .dropzone.has-file { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--bg)); }
+  .dropzone input[type="file"] { display: none; }
+  .dz-text { margin: 0; color: var(--muted); }
+  .has-file .dz-text { color: var(--fg); }
+  .link { color: var(--accent); cursor: pointer; }
+  details { margin: 1rem 0; }
+  summary { cursor: pointer; color: var(--muted); }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    gap: 0.6rem;
-    margin: 0.8rem 0;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.6rem 1rem;
+    margin-top: 0.8rem;
   }
-  label {
-    display: flex;
-    flex-direction: column;
-    font-size: 0.85rem;
-    color: var(--fg-dim);
-  }
-  label.check {
-    flex-direction: row;
-    align-items: center;
-    gap: 0.4rem;
-  }
-  label.check span {
-    color: var(--fg);
-  }
-  input,
-  select {
-    margin-top: 0.2rem;
-    padding: 0.35rem 0.5rem;
+  label { display: flex; flex-direction: column; font-size: 0.85rem; color: var(--muted); gap: 0.25rem; }
+  label.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
+  input, select {
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 4px;
-    background: var(--bg);
+    padding: 0.4rem 0.5rem;
     color: var(--fg);
     font: inherit;
   }
-  input:focus,
-  select:focus {
+  input:focus, select:focus {
     outline: 2px solid var(--accent);
     outline-offset: 0;
   }

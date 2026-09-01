@@ -16,7 +16,8 @@ export class ApiError extends Error {
 async function request(path, opts = {}) {
   const r = await fetch(BASE + path, opts);
   if (!r.ok) {
-    const text = await r.text();
+    let text = "";
+    try { text = await r.text(); } catch (_) { /* noop */ }
     throw new ApiError(r.status, r.statusText, text);
   }
   if (r.status === 204) return null;
@@ -27,53 +28,58 @@ export const api = {
   health: () => request("/api/health"),
   listJobs: () => request("/api/jobs"),
   getJob: (id) => request(`/api/jobs/${id}`),
-  cancelJob: (id) =>
-    request(`/api/jobs/${id}`, { method: "DELETE" }),
+  cancelJob: (id) => request(`/api/jobs/${id}`, { method: "DELETE" }),
+  deleteJob: (id) => request(`/api/jobs/${id}`, { method: "DELETE" }),
   defaultOptions: () => request("/api/config/defaults"),
   listModels: async () => {
     const r = await request("/api/config/models");
     return r && Array.isArray(r.models) ? r.models : [];
   },
-  jobFcpxmlUrl: (id) => `${BASE}/api/jobs/${id}/download/${id}.fcpxml`,
-  jobReportMdUrl: (id) => `${BASE}/api/jobs/${id}/download/${id}.report.md`,
-  jobReportJsonUrl: (id) => `${BASE}/api/jobs/${id}/download/${id}.report.json`,
+  jobFcpxmlUrl: (id) => `${BASE}/api/jobs/${id}/download/output.fcpxml`,
+  jobReportMdUrl: (id) => `${BASE}/api/jobs/${id}/download/report.md`,
+  jobReportJsonUrl: (id) => `${BASE}/api/jobs/${id}/download/report.json`,
 };
 
 // Named re-exports for convenience
-export const { health, listJobs, getJob, cancelJob, defaultOptions, listModels } = api;
+export const { health, listJobs, getJob, cancelJob, deleteJob, defaultOptions, listModels } = api;
 
-/** Open a WebSocket to ``/api/ws/jobs/{id}``. Returns the raw WebSocket. */
+/** Open a WebSocket to ``/api/ws/jobs/{id}`` (per-job). Returns the raw WebSocket. */
 export function openJobSocket(jobId) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return new WebSocket(`${proto}//${location.host}/api/ws/jobs/${jobId}`);
 }
 
-/** Submit a job: POST multipart with the file and JSON options. */
-export function submitJob(opts) {
-  const params = new URLSearchParams({
-    options: JSON.stringify({
-      noise_db: Number(opts.noiseDb),
-      min_silence: Number(opts.minSilence),
-      margin: Number(opts.margin),
-      no_silence: !!opts.noSilence,
-      no_subtitles: !!opts.noSubtitles,
-      model: opts.model,
-      language: opts.language || null,
-      device: opts.device,
-      compute_type: opts.computeType,
-      style_position: "bottom",
-      style_font: "Apple SD Gothic Neo",
-      style_font_size: 48,
-      style_max_chars: 42,
-      style_max_lines: 2,
-      style_min_duration: 0.8,
-      style_max_duration: 6.0,
-    }),
-  });
-  const fd = new FormData();
-  fd.append("file", opts.file, opts.file.name);
-  return request(`/api/jobs?${params}`, {
-    method: "POST",
-    body: fd,
-  });
+/** Open a WebSocket to ``/api/ws`` (global event stream). Returns the raw WebSocket. */
+export function openGlobalSocket() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return new WebSocket(`${proto}//${location.host}/api/ws`);
 }
+
+/**
+ * Submit a job. ``file`` is a ``File`` instance; ``options`` is an
+ * object whose keys mirror the backend query params:
+ *
+ *   noiseDb, minSilence, margin, noSilence, noSubtitles, model,
+ *   language, device, computeType, projectName, eventName, ...
+ */
+export function submitJob(file, options = {}) {
+  const params = new URLSearchParams();
+  const json = {
+    noise_db: Number(options.noiseDb ?? -30),
+    min_silence: Number(options.minSilence ?? 1.5),
+    margin: Number(options.margin ?? 0.2),
+    no_silence: !!options.noSilence,
+    no_subtitles: !!options.noSubtitles,
+    model: options.model || "medium",
+    language: options.language || null,
+    device: options.device || "auto",
+    compute_type: options.computeType || "auto",
+    project_name: options.projectName || "Auto Edit",
+    event_name: options.eventName || "veauto",
+  };
+  params.set("options", JSON.stringify(json));
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  return request(`/api/jobs?${params}`, { method: "POST", body: fd });
+}
+

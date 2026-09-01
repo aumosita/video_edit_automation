@@ -1,236 +1,184 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { api, openJobSocket } from "./api.js";
   import UploadCard from "./UploadCard.svelte";
+  import { listJobs, cancelJob, deleteJob, openGlobalSocket } from "./api.js";
 
-  let health = $state(null);
   let jobs = $state([]);
-  let err = $state("");
+  let ws = null;
+  let reconnectTimer = null;
+  let pollTimer = null;
 
-  /** jobId → WebSocket */
-  const sockets = new Map();
-
-  async function refresh() {
-    try {
-      const [hp, list] = await Promise.all([api.health(), api.listJobs()]);
-      health = hp;
-      jobs = list;
-      err = "";
-    } catch (e) {
-      err = e?.message || String(e);
-    }
-  }
-
-  onMount(() => {
-    refresh();
-    const t = setInterval(refresh, 4000);
-    return () => clearInterval(t);
+  onMount(async () => {
+    await refresh();
+    startGlobalWs();
+    startFallbackPoll();
   });
 
   onDestroy(() => {
-    for (const ws of sockets.values()) {
-      try { ws.close(); } catch {}
-    }
-    sockets.clear();
+    stopGlobalWs();
+    stopFallbackPoll();
   });
 
-  /** Patch one job in the local list (used by WebSocket events). */
-  function patchJob(id, patch) {
-    jobs = jobs.map((j) => (j.id === id ? { ...j, ...patch } : j));
+  async function refresh() {
+    try {
+      jobs = await listJobs();
+    } catch (e) {
+      console.error("listJobs failed:", e);
+    }
   }
 
-  function attachSocket(id) {
-    if (sockets.has(id)) return;
-    const ws = openJobSocket(id);
-    sockets.set(id, ws);
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === "state") {
-          patchJob(id, msg.payload);
-          if (
-            ["completed", "failed", "cancelled"].includes(msg.payload.status)
-          ) {
-            try { ws.close(); } catch {}
-            sockets.delete(id);
-            refresh();
+  function startGlobalWs() {
+    try {
+      ws = openGlobalSocket();
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "job" || msg.type === "job.update") {
+            upsertJob(msg.job);
+          } else if (msg.type === "job.deleted") {
+            jobs = jobs.filter((j) => j.id !== msg.id);
+          } else if (msg.type === "list") {
+            jobs = msg.jobs;
           }
-        } else if (msg.type === "log") {
-          // Could push to a log panel; for now ignored.
+        } catch (e) {
+          console.warn("bad ws message:", e);
         }
-      } catch (e) {
-        console.warn("ws parse error", e);
-      }
-    };
-    ws.onclose = () => { sockets.delete(id); };
-    ws.onerror = () => { sockets.delete(id); };
+      };
+      ws.onclose = () => {
+        ws = null;
+        reconnectTimer = setTimeout(() => {
+          startGlobalWs();
+          refresh();
+        }, 2000);
+      };
+      ws.onerror = () => {
+        try { ws && ws.close(); } catch (_) {}
+      };
+    } catch (e) {
+      console.warn("WS connect failed, will poll:", e);
+    }
   }
 
-  function ensureSocket(id) {
-    attachSocket(id);
+  function stopGlobalWs() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
   }
 
-  function onSubmitted(job) {
-    // Prepend optimistically; backend will broadcast real state.
-    jobs = [
-      {
-        ...job,
-        input_name: "uploading…",
-        input_size: 0,
-        progress: 0,
-        stage: "queued",
-        message: "Submitting…",
-      },
-      ...jobs,
-    ];
-    attachSocket(job.id);
-    setTimeout(refresh, 600);
+  function startFallbackPoll() {
+    pollTimer = setInterval(() => {
+      if (!ws || ws.readyState !== 1) refresh();
+    }, 5000);
+  }
+
+  function stopFallbackPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function upsertJob(job) {
+    const idx = jobs.findIndex((j) => j.id === job.id);
+    if (idx === -1) jobs = [job, ...jobs];
+    else {
+      const copy = jobs.slice();
+      copy[idx] = job;
+      jobs = copy;
+    }
   }
 
   async function onCancel(id) {
+    try { await cancelJob(id); } catch (e) { console.error("cancel failed:", e); }
+  }
+
+  async function onDelete(id) {
     try {
-      await api.cancelJob(id);
-      patchJob(id, { status: "cancelled" });
-    } catch (e) {
-      err = e?.message || String(e);
-    }
+      const r = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
+      if (r.ok) jobs = jobs.filter((j) => j.id !== id);
+    } catch (e) { console.error("delete failed:", e); }
   }
 
-  // Attach sockets for all running/queued jobs on every refresh.
-  $effect(() => {
-    for (const j of jobs) {
-      if (["queued", "running"].includes(j.status)) {
-        ensureSocket(j.id);
-      }
-    }
-  });
-
-  function statusBadge(s) {
-    switch (s) {
-      case "queued":    return "queued";
-      case "running":   return "running";
-      case "completed": return "completed";
-      case "failed":    return "failed";
-      case "cancelled": return "cancelled";
-      default: return "";
-    }
+  function onSubmitted(job) {
+    upsertJob(job);
   }
 
-  function fmtBytes(n) {
-    if (!n) return "—";
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  function statusClass(s) { return s || "queued"; }
+  function fmtDuration(secs) {
+    if (secs == null) return "—";
+    if (secs < 60) return `${secs.toFixed(1)}s`;
+    const m = Math.floor(secs / 60);
+    const s = (secs - m * 60).toFixed(0);
+    return `${m}m${s}s`;
   }
-
-  function fmtSeconds(s) {
-    if (s == null) return "—";
-    return `${Number(s).toFixed(1)}s`;
+  function shortTime(iso) {
+    if (!iso) return "";
+    return new Date(iso).toLocaleTimeString();
   }
 </script>
 
-<header>
+<header class="topbar">
   <div class="brand">
-    <span class="logo">🎬</span>
+    <span class="logo">▶</span>
     <span class="title">veauto</span>
-    <span class="muted subtitle">silence + subtitles · localhost</span>
+    <span class="subtitle">video edit automation</span>
   </div>
-  <div class="status">
-    {#if health}
-      <span class="muted mono">v{health.version}</span>
-      <span class="badge completed">● online</span>
-    {:else}
-      <span class="badge failed">● offline</span>
-    {/if}
+  <div class="actions">
+    <button class="ghost" onclick={refresh} title="Refresh">↻ Refresh</button>
   </div>
 </header>
 
 <main>
-  {#if err}
-    <div class="card error-card">
-      <strong>Connection error:</strong> {err}
-      <p class="muted">Is the backend running? Start it with
-        <code>uv run veauto serve</code>
-      </p>
-    </div>
-  {/if}
-
   <UploadCard onSubmitted={onSubmitted} />
 
-  <section class="card">
-    <div class="card-head">
-      <h2>Jobs</h2>
-      <button class="ghost" on:click={refresh}>↻ Refresh</button>
-    </div>
+  <section class="jobs">
+    <h2>Jobs <span class="count">({jobs.length})</span></h2>
+
     {#if jobs.length === 0}
-      <p class="muted">No jobs yet. Upload a video above to start.</p>
+      <p class="empty">No jobs yet. Upload a video to get started.</p>
     {:else}
       <table>
         <thead>
           <tr>
+            <th>Input</th>
             <th>Status</th>
-            <th>File</th>
-            <th>Size</th>
-            <th>Stage / progress</th>
-            <th>Stats</th>
+            <th>Progress</th>
+            <th>Silences</th>
+            <th>Words</th>
+            <th>Subs</th>
+            <th>Kept</th>
+            <th>Removed</th>
+            <th>Started</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {#each jobs as j (j.id)}
-            <tr>
+          {#each jobs as job (job.id)}
+            <tr class="row-{statusClass(job.status)}">
+              <td class="cell-name" title={job.input_name}>{job.input_name}</td>
+              <td><span class="badge badge-{statusClass(job.status)}">{job.status}</span></td>
               <td>
-                <span class="badge {statusBadge(j.status)}">{j.status}</span>
-              </td>
-              <td title={j.id}>
-                <strong>{j.input_name}</strong>
-                <div class="muted mono small">{j.id.slice(0, 12)}…</div>
-              </td>
-              <td>{fmtBytes(j.input_size)}</td>
-              <td class="stage-cell">
-                <div class="stage-line">
-                  <span class="muted small">{j.stage}</span>
-                  <span class="muted small">{j.message || ""}</span>
+                <div class="progress">
+                  <div class="bar" style="width: {Math.round((job.progress || 0) * 100)}%"></div>
+                  <span class="pct">{Math.round((job.progress || 0) * 100)}%</span>
                 </div>
-                <div class="progress" title="{(j.progress * 100).toFixed(0)}%">
-                  <div
-                    class="bar"
-                    class:running={j.status === "running"}
-                    class:done={j.status === "completed"}
-                    class:err={j.status === "failed"}
-                    style="width: {Math.max(0, Math.min(1, j.progress || 0)) * 100}%"
-                  ></div>
-                </div>
-                <div class="muted small">{Math.round((j.progress || 0) * 100)}%</div>
               </td>
-              <td class="muted small">
-                {#if j.num_silences != null}
-                  ✂ {j.num_silences} silences → {j.num_cuts} cuts<br />
-                  ⏱ kept {fmtSeconds(j.kept_duration)} / removed {fmtSeconds(j.removed_duration)}<br />
-                  💬 {j.num_subtitles ?? 0} subtitles
-                {:else}
-                  —
+              <td>{job.num_silences ?? "—"}</td>
+              <td>{job.num_words ?? "—"}</td>
+              <td>{job.num_subtitles ?? "—"}</td>
+              <td>{fmtDuration(job.kept_duration)}</td>
+              <td>{fmtDuration(job.removed_duration)}</td>
+              <td class="cell-time">{shortTime(job.started_at)}</td>
+              <td class="cell-actions">
+                {#if job.status === "queued" || job.status === "running"}
+                  <button class="link danger" onclick={() => onCancel(job.id)}>Cancel</button>
                 {/if}
-              </td>
-              <td>
-                <div class="actions">
-                  {#if ["queued", "running"].includes(j.status)}
-                    <button class="ghost" on:click={() => onCancel(j.id)}>Cancel</button>
-                  {/if}
-                  {#if j.status === "completed" && j.fcpxml_name}
-                    <a class="link" href={api.jobFcpxmlUrl(j.id)} download>FCPXML</a>
-                  {/if}
-                  {#if j.status === "completed" && j.report_md_name}
-                    <a class="link" href={api.jobReportMdUrl(j.id)} download>Report</a>
-                  {/if}
-                  {#if j.status === "completed" && j.report_json_name}
-                    <a class="link" href={api.jobReportJsonUrl(j.id)} download>JSON</a>
-                  {/if}
-                  {#if j.error}
-                    <span class="error" title={j.error}>⚠ {j.error.slice(0, 60)}</span>
-                  {/if}
-                </div>
+                {#if job.fcpxml_url}
+                  <a class="link" href={job.fcpxml_url} target="_blank" rel="noopener">.fcpxml</a>
+                {/if}
+                {#if job.report_md_url}
+                  <a class="link" href={job.report_md_url} target="_blank" rel="noopener">.md</a>
+                {/if}
+                {#if job.report_json_url}
+                  <a class="link" href={job.report_json_url} target="_blank" rel="noopener">.json</a>
+                {/if}
+                <button class="link danger" onclick={() => onDelete(job.id)}>Delete</button>
               </td>
             </tr>
           {/each}
@@ -240,70 +188,3 @@
   </section>
 </main>
 
-
-<header>
-  <div class="brand">
-    <span class="logo">🎬</span>
-    <span class="title">veauto</span>
-    <span class="muted subtitle">silence + subtitles · localhost</span>
-  </div>
-  <div class="status">
-    {#if health}
-      <span class="muted mono">v{health.version}</span>
-      <span class="badge completed">● online</span>
-    {:else}
-      <span class="badge failed">● offline</span>
-    {/if}
-  </div>
-</header>
-
-<main>
-  {#if err}
-    <div class="card error">
-      <strong>Connection error:</strong> {err}
-      <p class="muted">Is the backend running? Start it with:
-        <code>uv run veauto serve</code>
-      </p>
-    </div>
-  {/if}
-
-  <UploadCard {defaults} {models} on:submitted={onSubmitted} />
-
-  <JobsTable {jobs} {wsUrl} on:changed={onChanged} />
-</main>
-
-<style>
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 24px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .brand { display: flex; align-items: baseline; gap: 10px; }
-  .logo  { font-size: 22px; }
-  .title { font-size: 18px; font-weight: 700; letter-spacing: 0.02em; }
-  .subtitle { font-size: 12px; }
-  .status { display: flex; gap: 10px; align-items: center; }
-  main {
-    max-width: 1100px;
-    margin: 24px auto;
-    padding: 0 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-  }
-  .error {
-    border-color: var(--danger);
-    background: rgba(248, 81, 73, 0.08);
-  }
-  code {
-    font-family: "SF Mono", Menlo, Consolas, monospace;
-    font-size: 12px;
-    background: var(--bg);
-    padding: 1px 6px;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-  }
-</style>
