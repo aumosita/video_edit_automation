@@ -6,13 +6,26 @@ macOS and Linux, and parses the silencedetect log lines from stderr.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import signal
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from .models import SilenceConfig, SilenceInterval
+
+# How long (seconds) to wait between cancel polls while a subprocess is
+# running. 50 ms is small enough to feel snappy in the UI but large
+# enough to avoid burning CPU.
+_CANCEL_POLL_INTERVAL_S = 0.05
+
+# How long (seconds) to wait after SIGTERM for the process to exit
+# before sending SIGKILL.
+_TERM_GRACE_S = 1.0
 
 # Regexes for ffmpeg silencedetect log lines, e.g.:
 #   [silencedetect @ 0x...] silence_start: 12.345
@@ -23,6 +36,64 @@ _SILENCE_START_RE = re.compile(
 _SILENCE_END_RE = re.compile(
     r"silence_end:\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE
 )
+
+
+def run_with_cancel(
+    cmd: list[str],
+    *,
+    should_cancel: Callable[[], bool] | None,
+    poll_interval: float = _CANCEL_POLL_INTERVAL_S,
+    term_grace: float = _TERM_GRACE_S,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd`` cooperatively, polling ``should_cancel`` periodically.
+
+    If ``should_cancel`` is set while the process is still running, the
+    process group is sent ``SIGTERM``, then ``SIGKILL`` after a short
+    grace period. ``start_new_session=True`` ensures ffmpeg and any of
+    its children share a process group that can be killed atomically.
+
+    The fallback (no ``should_cancel``) is identical to
+    ``subprocess.run(cmd, capture_output=True, text=True)``.
+    """
+    if should_cancel is None:
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + term_grace
+    while True:
+        if should_cancel():
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                break
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    break
+                time.sleep(poll_interval)
+            else:
+                # Still alive after grace — force kill.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            break
+        ret = proc.poll()
+        if ret is not None:
+            break
+        time.sleep(poll_interval)
+    stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode if proc.returncode is not None else -1,
+        stdout=stdout or "",
+        stderr=stderr or "",
+    )
 
 
 @dataclass
@@ -137,8 +208,16 @@ def _run_silencedetect(
     noise_db: float,
     min_silence: float,
     audio_stream: int | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[list[SilenceInterval], str]:
-    """Run ffmpeg silencedetect, return (intervals, raw_stderr)."""
+    """Run ffmpeg silencedetect, return (intervals, raw_stderr).
+
+    If ``should_cancel`` is provided, it is polled periodically while
+    ffmpeg is running. When it returns ``True``, the ffmpeg process
+    group is sent ``SIGTERM`` (then ``SIGKILL`` after a short grace
+    period) and the function returns whatever has been parsed so far
+    along with the partial stderr.
+    """
     cmd: list[str] = [
         ffmpeg_path,
         "-hide_banner",
@@ -155,7 +234,7 @@ def _run_silencedetect(
         "null",
         "-",
     ])
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_with_cancel(cmd, should_cancel=should_cancel)
     return parse_silencedetect_output(result.stderr), result.stderr
 
 
@@ -202,6 +281,7 @@ def detect_silence(
     *,
     audio_stream: int | None = None,
     ffmpeg_path: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> list[SilenceInterval]:
     """Detect silence intervals in path using the given config.
 
@@ -215,6 +295,11 @@ def detect_silence(
         If set, select 0:a:{audio_stream} from the input.
     ffmpeg_path
         Override the ffmpeg binary path. Defaults to the one on PATH.
+    should_cancel
+        Optional callable polled periodically while ffmpeg runs. When it
+        returns ``True``, the ffmpeg process group is killed and the
+        partially-parsed intervals are returned. Use
+        ``lambda: cancel_event.is_set()`` from the web worker.
     """
     ffmpeg = ffmpeg_path or ensure_ffmpeg_available()
     intervals, _ = _run_silencedetect(
@@ -223,5 +308,6 @@ def detect_silence(
         noise_db=config.noise_db,
         min_silence=config.min_silence,
         audio_stream=audio_stream,
+        should_cancel=should_cancel,
     )
     return intervals

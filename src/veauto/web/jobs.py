@@ -432,15 +432,25 @@ class JobManager:
                 f"(noise<={silence_config.noise_db}dB, "
                 f"min>={silence_config.min_silence}s)…",
             )
-            res = orig_detect(p, silence_config)
+            res = orig_detect(
+                p, silence_config, should_cancel=cancel_event.is_set
+            )
             _enter("post_detect_silence")
             return res
 
-        def _extract(p):
+        def _extract(p, output_path=None):
             _check()
             _enter("extract_audio")
             progress("extracting_audio", 0.30, "Extracting audio…")
-            res = orig_extract(p)
+            # ``extract_audio`` requires (input_path, output_path). When
+            # ``output_path`` is None we fall back to the original
+            # caller's behaviour (some tests pass a single-arg stub).
+            if output_path is None:
+                res = orig_extract(p, should_cancel=cancel_event.is_set)
+            else:
+                res = orig_extract(
+                    p, output_path, should_cancel=cancel_event.is_set
+                )
             _enter("post_extract_audio")
             return res
 

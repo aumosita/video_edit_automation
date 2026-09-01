@@ -44,3 +44,6 @@ web/frontend/.vite/
 
 # Runtime data created by `veauto serve`
 veauto-data/
+
+# Test samples (committed with force, but ignored for local dev)
+# Use `git add -f tests/samples/<file>` to commit new fixtures.

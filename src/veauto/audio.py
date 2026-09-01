@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
-from .silence import ensure_ffmpeg_available
+from .silence import ensure_ffmpeg_available, run_with_cancel
 
 
 class AudioExtractionError(RuntimeError):
@@ -25,6 +26,7 @@ def extract_audio(
     sample_rate: int = 16000,
     channels: int = 1,
     ffmpeg_path: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Path:
     """Extract audio from ``input_path`` to ``output_path`` (WAV / PCM).
 
@@ -40,6 +42,11 @@ def extract_audio(
         Number of output channels (``1`` = mono).
     ffmpeg_path
         Optional override for the ffmpeg binary (defaults to PATH lookup).
+    should_cancel
+        Optional callable invoked periodically while ffmpeg is running.
+        If it returns ``True``, the ffmpeg process group is sent
+        ``SIGTERM`` (then ``SIGKILL`` after a 1 s grace period). Use
+        ``lambda: cancel_event.is_set()`` from the web worker.
 
     Returns
     -------
@@ -49,7 +56,8 @@ def extract_audio(
     Raises
     ------
     AudioExtractionError
-        If ffmpeg exits with a non-zero status.
+        If ffmpeg exits with a non-zero status (including a forced
+        kill via :data:`SIGKILL`, which reports ``-9``).
     """
     ff = ffmpeg_path or ensure_ffmpeg_available()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +72,7 @@ def extract_audio(
         "-f", "wav",                 # force WAV/PCM container
         str(output_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_with_cancel(cmd, should_cancel=should_cancel)
     if result.returncode != 0:
         raise AudioExtractionError(
             f"ffmpeg failed (rc={result.returncode}) while extracting audio:\n"
