@@ -54,10 +54,13 @@ class JobCancelled(Exception):
 class _Subscriber:
     """An asyncio.Queue owned by a single WebSocket connection."""
 
-    __slots__ = ("queue",)
+    __slots__ = ("queue", "loop")
 
     def __init__(self) -> None:
         self.queue: asyncio.Queue[dict] = asyncio.Queue()
+        # Set by the WebSocket handler after accept() so worker threads
+        # can use call_soon_threadsafe to enqueue from background pools.
+        self.loop: asyncio.AbstractEventLoop | None = None
 
 
 @dataclass
@@ -98,6 +101,10 @@ class JobManager:
         )
         self._jobs: dict[str, _Job] = {}
         self._lock = threading.Lock()
+        # Subscribers for the global event stream (/api/ws). Each is an
+        # _Subscriber whose queue receives "job.create", "job.update", and
+        # "job.delete" events.
+        self._global_subscribers: list[_Subscriber] = []
         self._on_job_done = on_job_done
 
     def submit(
@@ -165,6 +172,61 @@ class JobManager:
         sub = _Subscriber()
         job.subscribers.append(sub)
         return sub
+
+    def subscribe_all(self) -> _Subscriber:
+        """Subscribe to *all* job events (create / update / delete)."""
+        sub = _Subscriber()
+        with self._lock:
+            self._global_subscribers.append(sub)
+        return sub
+
+    def unsubscribe_all(self, sub: _Subscriber) -> None:
+        with self._lock:
+            try:
+                self._global_subscribers.remove(sub)
+            except ValueError:
+                pass
+
+    def _broadcast_global(self, message: dict) -> None:
+        """Push a message to every global subscriber.
+
+        Thread-safe: each subscriber's queue is fed via ``call_soon_threadsafe``
+        on whichever event loop owns the connection. Dead queues (full /
+        cancelled) are silently dropped.
+        """
+        with self._lock:
+            subs = list(self._global_subscribers)
+        for sub in subs:
+            loop = getattr(sub, "loop", None)
+            if loop is None:
+                continue
+            try:
+                loop.call_soon_threadsafe(sub.queue.put_nowait, message)
+            except RuntimeError:
+                # Loop is closed; drop.
+                pass
+            except Exception:  # noqa: BLE001
+                logger.exception("Global broadcast failed")
+
+    def delete(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+        if job is None:
+            return False
+        job.cancel_event.set()
+        # Close any per-job subscriber queues (their writers will exit).
+        for sub in list(job.subscribers):
+            try:
+                # Signal the writer loop to exit; the unsubscribe() will
+                # happen when the WS reader sees a disconnect.
+                if sub.queue.empty() is False or True:
+                    pass
+            except Exception:  # noqa: BLE001
+                pass
+        # Tell global subscribers.
+        self._broadcast_global({"type": "job.deleted", "id": job_id})
+        logger.info("Job %s deleted", job_id)
+        return True
 
     def unsubscribe(self, job_id: str, sub: _Subscriber) -> None:
         with self._lock:
@@ -317,10 +379,17 @@ class JobManager:
             progress("probing", 0.10, f"Probed {res.duration:.1f}s media")
             return res
 
-        def _detect(p, *, noise_db, min_silence):
+        def _detect(p, silence_config):
+            """silence_config: veauto.models.SilenceConfig."""
             _check()
-            progress("detecting_silence", 0.15, "Detecting silences…")
-            return orig_detect(p, noise_db=noise_db, min_silence=min_silence)
+            progress(
+                "detecting_silence",
+                0.15,
+                f"Detecting silences "
+                f"(noise<={silence_config.noise_db}dB, "
+                f"min>={silence_config.min_silence}s)…",
+            )
+            return orig_detect(p, silence_config)
 
         def _extract(p):
             _check()

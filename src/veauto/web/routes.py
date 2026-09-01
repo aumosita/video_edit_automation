@@ -254,3 +254,102 @@ async def ws_jobs(websocket: WebSocket, job_id: str) -> None:
         pass
     finally:
         mgr.unsubscribe(job_id, sub)
+
+
+# ---------------------------------------------------------------------------
+# Global event stream
+# ---------------------------------------------------------------------------
+
+
+@router.websocket("/ws")
+async def ws_global(websocket: WebSocket) -> None:
+    """Push every job's lifecycle events (create / update / delete).
+
+    Used by the SPA to keep the job table in sync without polling
+    ``GET /api/jobs``. Pairs with :meth:`JobManager.subscribe_all`.
+
+    Local-only security: we accept any ``Origin`` that points at
+    ``localhost`` or ``127.0.0.1`` (any port). Reject anything else
+    with ``1008`` (policy violation) so a browser opened against
+    a remote host cannot subscribe to the local job stream.
+    """
+    if not _is_local_origin(websocket):
+        await websocket.close(code=1008, reason="origin not allowed")
+        return
+
+    mgr = _manager()
+    await websocket.accept()
+
+    sub = mgr.subscribe_all()
+    # The broadcast path uses call_soon_threadsafe on this loop; the
+    # worker thread writes to a queue that lives on this loop's queue.
+    sub.loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+
+    # Send a snapshot of all current jobs so the UI can render on connect.
+    try:
+        await websocket.send_json(
+            {
+                "type": "snapshot",
+                "records": [r.model_dump(mode="json") for r in mgr.list_jobs()],
+            }
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Initial snapshot send failed")
+        mgr.unsubscribe_all(sub)
+        await websocket.close()
+        return
+
+    async def _reader() -> None:
+        """Read client messages (ping only)."""
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+        except WebSocketDisconnect:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("WS global reader failed")
+            return
+
+    async def _writer() -> None:
+        """Forward queue messages to the WebSocket."""
+        try:
+            while True:
+                msg = await sub.queue.get()
+                await websocket.send_json(msg)
+        except WebSocketDisconnect:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("WS global writer failed")
+            return
+        finally:
+            mgr.unsubscribe_all(sub)
+
+    try:
+        await asyncio.gather(_reader(), _writer())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        mgr.unsubscribe_all(sub)
+
+
+def _is_local_origin(websocket: WebSocket) -> bool:
+    """Allow only ``localhost`` / ``127.0.0.1`` (any port) for WS."""
+    origin = websocket.headers.get("origin") or websocket.headers.get("Origin")
+    if not origin:
+        # No Origin header: the server is bound to 127.0.0.1 so only
+        # local clients can connect; we let them in.
+        host = websocket.headers.get("host") or ""
+        return host.startswith("localhost") or host.startswith("127.0.0.1")
+    # Accept http://localhost[:port] and http://127.0.0.1[:port]
+    lowered = origin.lower().strip()
+    for prefix in ("http://localhost", "ws://localhost", "https://localhost",
+                   "http://127.0.0.1", "ws://127.0.0.1", "https://127.0.0.1"):
+        if lowered == prefix or lowered.startswith(prefix + ":"):
+            return True
+    return False

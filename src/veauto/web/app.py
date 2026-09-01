@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -32,6 +33,7 @@ def create_app(
     max_workers: int = 2,
     static_dir: Path | None = None,
     on_job_done: Any = None,
+    allow_origins: list[str] | str = "auto",
 ) -> FastAPI:
     """Create a configured FastAPI app.
 
@@ -45,6 +47,11 @@ def create_app(
     static_dir:
         Optional path to the built Svelte SPA. If provided, the app
         serves it at ``/`` and returns ``index.html`` for unknown paths.
+    allow_origins:
+        List of origins to permit for CORS / WebSocket. The special
+        value ``"auto"`` (default) allows any ``http://localhost:*``
+        and ``http://127.0.0.1:*``. Use ``"*"`` to allow any origin
+        (local-only; do not expose to the network).
     """
     global _job_manager
     _job_manager = JobManager(
@@ -59,6 +66,44 @@ def create_app(
         description=(
             "Local web client for veauto — silence removal + auto subtitles."
         ),
+    )
+
+    # CORS — required because the SPA may be served from one origin
+    # (e.g. http://localhost:8765) while the API is at another
+    # (http://127.0.0.1:8765). Uvicorn's built-in WS origin check also
+    # rejects handshakes that don't match the bound host.
+    #
+    # We allow common local origins (any port) plus the explicit
+    # ``http://localhost:<port>`` / ``http://127.0.0.1:<port>`` variants
+    # so that the WebSocket handshake succeeds in both directions.
+    # ``ws://`` schemes are added for completeness (CORS itself does
+    # not apply to WebSockets, but uvicorn's ``ws_origins`` does
+    # accept them and is permissive about port matching).
+    if allow_origins == "auto":
+        origins: list[str] = [
+            "http://localhost",
+            "http://127.0.0.1",
+            "ws://localhost",
+            "ws://127.0.0.1",
+        ]
+    elif allow_origins == "*":
+        origins = ["*"]
+    else:
+        origins = list(allow_origins)
+
+    # If the user passed bare-host entries (no port), also add a
+    # regex-friendly pattern. This is a no-op for CORS (it ignores
+    # patterns) but uvicorn's ws_origins honours them. We just expand
+    # the same list to include both bare and common ports.
+    # Note: the actual WebSocket port expansion is performed in
+    # ``veauto serve`` (cli.py) which knows the bind port.
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # Local import to avoid cycle

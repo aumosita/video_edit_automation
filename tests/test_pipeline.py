@@ -387,4 +387,50 @@ class TestRunPipelineErrors:
             run_pipeline(tmp_path / "ghost.mp4", PipelineConfig())
 
 
+class TestRunPipelineSubtitleAudio:
+    """Regression: ``extract_audio`` must be called with an explicit
+    ``output_path``. A previous version passed only ``input_path`` and
+    raised ``TypeError: extract_audio() missing 1 required positional
+    argument: 'output_path'`` on real media (HEVC MOV, etc.).
+    """
+
+    def test_extract_audio_receives_output_path(self, monkeypatch, tmp_path):
+        from veauto import pipeline as pl
+        from veauto.models import MediaInfo, PipelineConfig
+
+        # Real ffmpeg-style fake: signature must match veauto.audio.extract_audio
+        # (input_path, output_path, *, sample_rate, channels, ffmpeg_path).
+        captured: dict = {}
+
+        def fake_extract(input_path, output_path, **_):
+            captured["input_path"] = input_path
+            captured["output_path"] = output_path
+            Path(output_path).write_bytes(b"RIFF")
+            return Path(output_path)
+
+        # Stub probe so we don't touch the filesystem.
+        media = MediaInfo(
+            path=tmp_path / "in.mp4",
+            duration=10.0,
+            width=1920,
+            height=1080,
+            frame_rate=30.0,
+            has_audio=True,
+        )
+        monkeypatch.setattr(pl, "probe_media_info", lambda *a, **kw: media)
+        monkeypatch.setattr(pl, "extract_audio", fake_extract)
+        monkeypatch.setattr(pl, "_transcribe", lambda *a, **kw: [])
+
+        cfg = PipelineConfig()
+        cfg.silence.enabled = False  # skip silence to focus on audio
+        cfg.subtitle.enabled = True
+        input_path = tmp_path / "in.mp4"
+        input_path.write_bytes(b"fake")
+
+        result = run_pipeline(input_path, cfg)
+        assert "output_path" in captured
+        assert Path(captured["output_path"]).parent == input_path.parent
+        assert result.audio_path == Path(captured["output_path"])
+
+
 

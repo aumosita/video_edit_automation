@@ -379,6 +379,12 @@ def serve(
         None, '--ui-dir',
         help='Path to the built Svelte SPA. Defaults to web/frontend/dist.',
     ),
+    allow_origins: str = typer.Option(
+        'auto', '--allow-origins',
+        help='Comma-separated list of allowed WebSocket/HTTP origins. '
+             '"auto" = localhost + 127.0.0.1. Use "*" to allow any origin '
+             '(local-only; do not expose to the network).',
+    ),
 ):
     '''Run the veauto web server (FastAPI + WebSocket).
 
@@ -415,6 +421,7 @@ def serve(
         output_root=Path(output_dir),
         max_workers=workers,
         static_dir=static_dir,
+        allow_origins=allow_origins,
     )
 
     console.print(f'[bold green]veauto web[/bold green] listening on '
@@ -428,10 +435,50 @@ def serve(
     console.print(f'[bold]Data:[/bold]  {Path(output_dir).resolve()}')
 
     import uvicorn as _uvicorn
-    _uvicorn.run(
+
+    # Origin allowlist. Uvicorn's built-in WebSocket origin check only
+    # allows the same host:port as the server. Browsers typically open
+    # ``ws://127.0.0.1:<port>`` while we may bind ``localhost`` (or
+    # vice-versa), and the bare-host variants like
+    # ``http://localhost`` / ``http://127.0.0.1`` are also common when
+    # the browser sends the request. ``ws_origins`` widens the set to
+    # include both with and without the explicit port, and both
+    # ``http://`` and ``ws://`` schemes.
+    if allow_origins == 'auto':
+        port_str = str(port)
+        ws_allowed_origins = [
+            # Bare host (any port) — uvicorn matches these as prefixes
+            'http://localhost',
+            'http://127.0.0.1',
+            'ws://localhost',
+            'ws://127.0.0.1',
+            # Explicit port — covers the most common cases
+            f'http://localhost:{port_str}',
+            f'http://127.0.0.1:{port_str}',
+            f'ws://localhost:{port_str}',
+            f'ws://127.0.0.1:{port_str}',
+        ]
+    elif allow_origins == '*':
+        ws_allowed_origins = ['*']
+    else:
+        ws_allowed_origins = [
+            o.strip() for o in allow_origins.split(',') if o.strip()
+        ]
+
+    config = _uvicorn.Config(
         app,
         host=host,
         port=port,
         log_level='info',
         reload=reload_,
+        # Force the ``websockets`` (PyPI) protocol implementation.
+        # uvicorn's default on Linux picks ``wsproto`` which performs
+        # its own Origin header check (rejecting ``localhost`` vs
+        # ``127.0.0.1`` mismatches with 403). ``websockets`` is more
+        # permissive and we validate origin explicitly in the
+        # WebSocket handler (see ``veauto.web.routes``).
+        ws='websockets',
+        ws_origins=ws_allowed_origins,
     )
+    server = _uvicorn.Server(config)
+    server.run()

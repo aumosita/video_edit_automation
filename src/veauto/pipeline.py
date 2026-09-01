@@ -186,11 +186,7 @@ def run_pipeline(
 
     # 1. Silence detection & cut segments
     if config.silence.enabled:
-        silences = detect_silence(
-            input_path,
-            noise_db=config.silence.noise_db,
-            min_silence=config.silence.min_silence,
-        )
+        silences = detect_silence(input_path, config.silence)
         cuts, removed = build_cut_segments(
             result.media.duration,
             silences,
@@ -205,7 +201,15 @@ def run_pipeline(
         if not result.media.has_audio:
             logger.warning("Source has no audio; skipping subtitle generation")
         else:
-            audio_path = extract_audio(input_path)
+            # Build a temp audio path next to the input so the WAV lives
+            # somewhere predictable (caller / web layer can override).
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav", delete=False, dir=Path(input_path).parent
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+            audio_path = extract_audio(input_path, tmp_path)
             result.audio_path = audio_path
 
             t = transcriber or _transcribe
