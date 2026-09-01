@@ -1,0 +1,238 @@
+"""End-to-end pipeline: silence removal + subtitle generation.
+
+This module orchestrates the stages used by the ``veauto run`` subcommand:
+
+1. Probe the input media (duration, dimensions, frame rate, audio).
+2. Detect silences via :mod:`veauto.silence`.
+3. Build cut segments via :mod:`veauto.segments`.
+4. (Optionally) extract audio via :mod:`veauto.audio`.
+5. (Optionally) transcribe via :mod:`veauto.transcriber`.
+6. (Optionally) group words into subtitle lines.
+7. Re-base subtitles onto the cut timeline.
+8. Render an FCPXML via :mod:`veauto.fcpxml_builder`.
+
+The driver function (``run_pipeline``) performs I/O. The pure helpers
+(``remap_subtitles``) are unit-testable without ffmpeg or faster-whisper.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .audio import extract_audio
+from .fcpxml_builder import build_fcpxml
+from .models import (
+    CutSegment,
+    MediaInfo,
+    PipelineConfig,
+    RemovedSilence,
+    SubtitleSegment,
+    Word,
+)
+from .segments import build_cut_segments
+from .silence import detect_silence, probe_media_info
+from .transcriber import (
+    transcribe as _transcribe,
+)
+from .transcriber import (
+    words_to_subtitle_segments,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PipelineResult:
+    """The full output of :func:`run_pipeline`."""
+
+    media: MediaInfo
+    cuts: list[CutSegment] = field(default_factory=list)
+    removed: list[RemovedSilence] = field(default_factory=list)
+    words: list[Word] = field(default_factory=list)
+    subtitles: list[SubtitleSegment] = field(default_factory=list)
+    audio_path: Path | None = None
+    fcpxml: str = ""
+
+    @property
+    def total_duration(self) -> float:
+        return self.media.duration
+
+    @property
+    def kept_duration(self) -> float:
+        return sum(c.duration for c in self.cuts)
+
+    @property
+    def removed_duration(self) -> float:
+        return sum(r.duration for r in self.removed)
+
+    def to_report_data(self) -> dict:
+        """Return a JSON-serialisable dict describing this run.
+
+        This is a thin convenience wrapper around
+        :func:`veauto.report.build_report_data` so that callers do not
+        have to import the report module to get the same data.
+        """
+        from .report import build_report_data
+
+        return build_report_data(self)
+
+
+def remap_subtitles(
+    cuts: list[CutSegment],
+    subtitles: list[SubtitleSegment],
+) -> list[SubtitleSegment]:
+    """Re-base subtitles from the source timeline to the cut timeline.
+
+    For every subtitle, find the cut segment it falls into (by source
+    times) and shift it to the new (compacted) timeline. The relative
+    order is preserved.
+
+    Subtitles that start in a removed silence are **dropped**. Subtitles
+    that extend past the end of a cut are **clipped** to the cut's end.
+
+    Parameters
+    ----------
+    cuts:
+        The kept segments in the source timeline.
+    subtitles:
+        The subtitle lines, timed against the source media.
+
+    Returns
+    -------
+    list[SubtitleSegment]
+        Subtitles re-timed against the compacted timeline.
+    """
+    if not cuts or not subtitles:
+        return []
+
+    cuts_sorted = sorted(cuts, key=lambda c: c.source_in)
+    # Cumulative offset for each cut's start in the new timeline.
+    cumulative: list[float] = []
+    running = 0.0
+    for c in cuts_sorted:
+        cumulative.append(running)
+        running += c.duration
+
+    remapped: list[SubtitleSegment] = []
+    for sub in subtitles:
+        target_idx: int | None = None
+        offset_in_cut = 0.0
+        for idx, c in enumerate(cuts_sorted):
+            if c.source_in <= sub.start < c.source_out:
+                target_idx = idx
+                offset_in_cut = sub.start - c.source_in
+                break
+        if target_idx is None:
+            # Subtitle starts in a removed silence → drop.
+            continue
+
+        target_cut = cuts_sorted[target_idx]
+        sub_dur = max(0.0, sub.end - sub.start)
+        remaining = target_cut.duration - offset_in_cut
+        clipped_dur = min(sub_dur, remaining)
+        if clipped_dur <= 0:
+            continue
+
+        new_start = cumulative[target_idx] + offset_in_cut
+        new_end = new_start + clipped_dur
+        remapped.append(
+            SubtitleSegment(
+                start=new_start,
+                end=new_end,
+                text=sub.text,
+            )
+        )
+    return remapped
+
+
+def _cleanup_audio(audio_path: Path | None, *, keep: bool) -> None:
+    """Remove the temporary WAV file unless the user opted in to keep it."""
+    if audio_path is None or keep:
+        return
+    try:
+        audio_path.unlink(missing_ok=True)
+        logger.debug("Removed temp audio: %s", audio_path)
+    except OSError as exc:  # pragma: no cover - filesystem errors
+        logger.warning("Failed to remove temp audio %s: %s", audio_path, exc)
+
+
+def run_pipeline(
+    input_path: Path,
+    config: PipelineConfig,
+    *,
+    transcriber: Callable[..., list[Word]] | None = None,
+) -> PipelineResult:
+    """Run the full pipeline and return a :class:`PipelineResult`.
+
+    Parameters
+    ----------
+    input_path:
+        The source media file.
+    config:
+        The combined pipeline configuration.
+    transcriber:
+        Optional override for the transcribe function. Used by tests to
+        inject a fake. Must have the same signature as
+        :func:`veauto.transcriber.transcribe`.
+    """
+    input_path = Path(input_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input media not found: {input_path}")
+
+    result = PipelineResult(media=probe_media_info(input_path))
+
+    # 1. Silence detection & cut segments
+    if config.silence.enabled:
+        silences = detect_silence(
+            input_path,
+            noise_db=config.silence.noise_db,
+            min_silence=config.silence.min_silence,
+        )
+        cuts, removed = build_cut_segments(
+            result.media.duration,
+            silences,
+            margin=config.silence.margin,
+        )
+        result.cuts = cuts
+        result.removed = removed
+
+    # 2. Subtitle generation
+    audio_path: Path | None = None
+    if config.subtitle.enabled:
+        if not result.media.has_audio:
+            logger.warning("Source has no audio; skipping subtitle generation")
+        else:
+            audio_path = extract_audio(input_path)
+            result.audio_path = audio_path
+
+            t = transcriber or _transcribe
+            words = t(audio_path, config.subtitle)
+            result.words = words
+            result.subtitles = words_to_subtitle_segments(
+                words,
+                max_chars_per_line=config.subtitle.style.max_chars_per_line,
+                max_lines=config.subtitle.style.max_lines,
+                min_duration=config.subtitle.style.min_duration,
+                max_duration=config.subtitle.style.max_duration,
+            )
+
+            if result.cuts:
+                result.subtitles = remap_subtitles(result.cuts, result.subtitles)
+
+    # 3. Render FCPXML
+    result.fcpxml = build_fcpxml(
+        result.media,
+        result.cuts,
+        subtitles=result.subtitles or None,
+        subtitle_style=config.subtitle.style if result.subtitles else None,
+        project_name=config.output.project_name,
+        event_name=config.output.event_name,
+    )
+
+    # 4. Cleanup temp audio
+    _cleanup_audio(audio_path, keep=config.keep_temp)
+    return result
+
