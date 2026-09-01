@@ -437,33 +437,11 @@ def serve(
     import uvicorn as _uvicorn
 
     # Origin allowlist. Uvicorn's built-in WebSocket origin check only
-    # allows the same host:port as the server. Browsers typically open
-    # ``ws://127.0.0.1:<port>`` while we may bind ``localhost`` (or
-    # vice-versa), and the bare-host variants like
-    # ``http://localhost`` / ``http://127.0.0.1`` are also common when
-    # the browser sends the request. ``ws_origins`` widens the set to
-    # include both with and without the explicit port, and both
-    # ``http://`` and ``ws://`` schemes.
-    if allow_origins == 'auto':
-        port_str = str(port)
-        ws_allowed_origins = [
-            # Bare host (any port) — uvicorn matches these as prefixes
-            'http://localhost',
-            'http://127.0.0.1',
-            'ws://localhost',
-            'ws://127.0.0.1',
-            # Explicit port — covers the most common cases
-            f'http://localhost:{port_str}',
-            f'http://127.0.0.1:{port_str}',
-            f'ws://localhost:{port_str}',
-            f'ws://127.0.0.1:{port_str}',
-        ]
-    elif allow_origins == '*':
-        ws_allowed_origins = ['*']
-    else:
-        ws_allowed_origins = [
-            o.strip() for o in allow_origins.split(',') if o.strip()
-        ]
+    # Allow-origin policy is forwarded into the FastAPI app via
+    # ``create_app(allow_origins=...)`` which installs a CORSMiddleware.
+    # WebSocket origin validation is performed explicitly inside the
+    # WebSocket route handler (see ``veauto.web.routes``).
+    _ = allow_origins  # used by the app factory above
 
     config = _uvicorn.Config(
         app,
@@ -478,7 +456,6 @@ def serve(
         # permissive and we validate origin explicitly in the
         # WebSocket handler (see ``veauto.web.routes``).
         ws='websockets',
-        ws_origins=ws_allowed_origins,
     )
     server = _uvicorn.Server(config)
     server.run()

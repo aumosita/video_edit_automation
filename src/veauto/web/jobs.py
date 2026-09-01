@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -263,15 +264,48 @@ class JobManager:
     def _run_job(self, job: _Job) -> None:
         """Worker body. Runs in a thread-pool thread."""
         record = job.record
+        # Stage timing for hang diagnostics (D-step C).
+        _stage_t0 = [0.0]
+        _stage_name = [""]
+        _last_event_t = [time.monotonic()]
+
+        def _heartbeat() -> None:
+            """Emit a debug log if no progress is made for 60s.
+
+            Helps locate which stage a worker is stuck in when a long
+            ffmpeg call (e.g. silencedetect on a 4K HEVC MOV) provides
+            no intermediate progress.
+            """
+            now = time.monotonic()
+            if _stage_name[0] and (now - _last_event_t[0]) > 60.0:
+                logger.warning(
+                    "Job %s still in stage=%s for %.0fs",
+                    record.id, _stage_name[0], now - _stage_t0[0],
+                )
+                _last_event_t[0] = now
+
+        def _enter_stage(name: str) -> None:
+            now = time.monotonic()
+            logger.info(
+                "Job %s -> stage %s (prev took %.2fs)",
+                record.id, name,
+                (now - _stage_t0[0]) if _stage_t0[0] else 0.0,
+            )
+            _stage_t0[0] = now
+            _stage_name[0] = name
+            _last_event_t[0] = now
+
         try:
             self._check_cancel(job)
             self._set_status(job, "running", stage="probing", progress=0.05,
                              message="Probing media…")
+            _enter_stage("probing")
             cfg = record.options.to_pipeline_config()
 
             def _progress(stage: str, fraction: float, message: str = "") -> None:
                 if job.cancel_event.is_set():
                     raise JobCancelled()
+                _heartbeat()
                 self._set_status(
                     job,
                     "running",
@@ -281,7 +315,9 @@ class JobManager:
                 )
 
             result = self._run_pipeline_with_progress(
-                job.input_path, cfg, _progress, cancel_event=job.cancel_event
+                job.input_path, cfg, _progress,
+                cancel_event=job.cancel_event,
+                on_stage=_enter_stage,
             )
             self._check_cancel(job)
 
@@ -348,6 +384,7 @@ class JobManager:
         progress: Callable[[str, float, str], None],
         *,
         cancel_event: threading.Event,
+        on_stage: Callable[[str], None] | None = None,
     ):
         """Run ``run_pipeline`` while emitting progress events.
 
@@ -373,8 +410,13 @@ class JobManager:
             if cancel_event.is_set():
                 raise JobCancelled()
 
+        def _enter(name: str) -> None:
+            if on_stage is not None:
+                on_stage(name)
+
         def _probe(p):
             _check()
+            _enter("probe_media_info")
             res = orig_probe(p)
             progress("probing", 0.10, f"Probed {res.duration:.1f}s media")
             return res
@@ -382,6 +424,7 @@ class JobManager:
         def _detect(p, silence_config):
             """silence_config: veauto.models.SilenceConfig."""
             _check()
+            _enter("detect_silence")
             progress(
                 "detecting_silence",
                 0.15,
@@ -389,25 +432,35 @@ class JobManager:
                 f"(noise<={silence_config.noise_db}dB, "
                 f"min>={silence_config.min_silence}s)…",
             )
-            return orig_detect(p, silence_config)
+            res = orig_detect(p, silence_config)
+            _enter("post_detect_silence")
+            return res
 
         def _extract(p):
             _check()
+            _enter("extract_audio")
             progress("extracting_audio", 0.30, "Extracting audio…")
-            return orig_extract(p)
+            res = orig_extract(p)
+            _enter("post_extract_audio")
+            return res
 
         def _transcribe(audio_path, sub_cfg):
             _check()
+            _enter("transcribe")
             progress("transcribing", 0.40,
                      f"Transcribing (model={sub_cfg.model})…")
             words = orig_transcribe(audio_path, sub_cfg)
+            _enter("post_transcribe")
             progress("transcribing", 0.75, f"Transcribed {len(words)} words")
             return words
 
         def _cuts(total, silences, *, margin):
             _check()
+            _enter("build_cut_segments")
             progress("building_cuts", 0.20, "Building cut segments…")
-            return orig_cuts(total, silences, margin=margin)
+            res = orig_cuts(total, silences, margin=margin)
+            _enter("post_build_cut_segments")
+            return res
 
         def _words_to_subs(words, **kw):
             _check()
