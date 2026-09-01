@@ -44,6 +44,54 @@ class TestJobOptions:
         again = JobOptions.model_validate_json(opts.model_dump_json())
         assert again == opts
 
+
+class TestJobRecordDownloadUrls:
+    """``JobRecord.with_download_urls`` must populate the ``*_url``
+    fields based on the ``*_name`` fields and the job id.
+    """
+
+    def _make(self, **kw):
+        from veauto.web.schemas import JobRecord
+        defaults = {
+            "id": "abc123",
+            "status": "completed",
+            "input_name": "x.mp4",
+            "input_size": 1,
+        }
+        defaults.update(kw)
+        return JobRecord(**defaults)
+
+    def test_urls_none_when_names_none(self):
+        rec = self._make()
+        rec2 = rec.with_download_urls()
+        assert rec2.fcpxml_url is None
+        assert rec2.report_md_url is None
+        assert rec2.report_json_url is None
+
+    def test_urls_populated_from_names(self):
+        rec = self._make(
+            fcpxml_name="output.fcpxml",
+            report_md_name="report.md",
+            report_json_name="report.json",
+        )
+        rec2 = rec.with_download_urls()
+        assert rec2.fcpxml_url == "/api/jobs/abc123/download/output.fcpxml"
+        assert rec2.report_md_url == "/api/jobs/abc123/download/report.md"
+        assert rec2.report_json_url == "/api/jobs/abc123/download/report.json"
+
+    def test_does_not_mutate_original(self):
+        rec = self._make(fcpxml_name="output.fcpxml")
+        rec2 = rec.with_download_urls()
+        assert rec.fcpxml_url is None
+        assert rec2.fcpxml_url is not None
+
+    def test_partial_names(self):
+        rec = self._make(fcpxml_name="out.fcpxml")  # no md / json
+        rec2 = rec.with_download_urls()
+        assert rec2.fcpxml_url is not None
+        assert rec2.report_md_url is None
+        assert rec2.report_json_url is None
+
     def test_extreme_values(self):
         # Pydantic does not clamp by default; ensure values are preserved
         opts = JobOptions(noise_db=-90.0, beam_size=1, style_font_size=8)

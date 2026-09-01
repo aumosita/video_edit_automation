@@ -540,10 +540,21 @@ class JobManager:
             snapshot = rec.model_copy(deep=True)
             subs = list(job.subscribers)
             loop = job.loop
-        if loop is None:
-            return
-        for sub in subs:
-            loop.call_soon_threadsafe(
-                sub.queue.put_nowait,
-                {"type": "state", "record": snapshot.model_dump(mode="json")},
-            )
+        # Per-job subscribers (legacy ``/ws/jobs/{id}`` endpoint) get a
+        # ``state`` message; the global subscribers (the SPA's main
+        # ``/api/ws`` connection) get a ``job.update`` message with the
+        # same payload. Both carry the full record so the client can
+        # replace its row in place.
+        snapshot_with_urls = snapshot.with_download_urls()
+        snapshot_json = snapshot_with_urls.model_dump(mode="json")
+        if loop is not None:
+            for sub in subs:
+                loop.call_soon_threadsafe(
+                    sub.queue.put_nowait,
+                    {"type": "state", "job": snapshot_json},
+                )
+        # Broadcast to every global subscriber so the live table updates
+        # in real time even before the job's WS connect handshake.
+        self._broadcast_global(
+            {"type": "job.update", "job": snapshot_json}
+        )

@@ -33,12 +33,25 @@
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.type === "job" || msg.type === "job.update") {
-            upsertJob(msg.job);
+          if (
+            msg.type === "job.update" ||
+            msg.type === "job.create" ||
+            msg.type === "state"
+          ) {
+            if (msg.job) upsertJob(msg.job);
           } else if (msg.type === "job.deleted") {
             jobs = jobs.filter((j) => j.id !== msg.id);
+          } else if (msg.type === "snapshot") {
+            // Replace the whole table with the server's truth. Using
+            // upsert (per-row) would leave deleted rows alive.
+            jobs = Array.isArray(msg.jobs) ? msg.jobs : [];
           } else if (msg.type === "list") {
-            jobs = msg.jobs;
+            // Legacy message shape; kept for backward compat.
+            jobs = Array.isArray(msg.jobs) ? msg.jobs : [];
+          } else if (msg.type === "pong") {
+            // Heartbeat reply — nothing to do.
+          } else {
+            console.debug("unhandled ws message:", msg);
           }
         } catch (e) {
           console.warn("bad ws message:", e);

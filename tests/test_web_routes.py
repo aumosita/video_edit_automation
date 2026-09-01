@@ -179,6 +179,9 @@ class TestJobSubmission:
         r = client.get("/api/jobs/ghost")
         assert r.status_code == 404
 
-    def test_cancel_unknown_job_404(self, client: TestClient):
+    def test_delete_unknown_job_is_idempotent_204(self, client: TestClient):
+        """DELETE must be idempotent: an unknown id returns 204, not
+        404, so the UI can blindly call it without race conditions.
+        """
         r = client.delete("/api/jobs/ghost")
-        assert r.status_code == 404
+        assert r.status_code == 204

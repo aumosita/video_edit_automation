@@ -88,7 +88,7 @@ async def create_job(
 @router.get("/jobs", response_model=list[JobRecord])
 async def list_jobs() -> list[JobRecord]:
     mgr = _manager()
-    return mgr.list_jobs()
+    return [r.with_download_urls() for r in mgr.list_jobs()]
 
 
 @router.get("/jobs/{job_id}", response_model=JobRecord)
@@ -97,15 +97,22 @@ async def get_job(job_id: str) -> JobRecord:
     rec = mgr.get(job_id)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    return rec
+    return rec.with_download_urls()
 
 
 @router.delete("/jobs/{job_id}", status_code=204)
 async def cancel_job(job_id: str) -> None:
+    """Cancel a running job and remove it from the manager.
+
+    A single DELETE call covers both operations: the worker thread is
+    signalled to stop (``cancel_event.set``) and the job is popped from
+    the in-memory map so subsequent ``GET /api/jobs`` calls won't
+    resurrect it. The endpoint is idempotent — calling DELETE on an
+    unknown id returns 204.
+    """
     mgr = _manager()
-    if mgr.get(job_id) is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    mgr.cancel(job_id)
+    mgr.delete(job_id)  # idempotent: returns False if already gone
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +211,10 @@ async def ws_jobs(websocket: WebSocket, job_id: str) -> None:
         rec_now = mgr.get(job_id)
         if rec_now is not None:
             await websocket.send_json(
-                {"type": "state", "record": rec_now.model_dump(mode="json")}
+                {
+                    "type": "state",
+                    "job": rec_now.with_download_urls().model_dump(mode="json"),
+                }
             )
     except Exception:  # noqa: BLE001
         logger.exception("Initial state send failed")
@@ -290,7 +300,10 @@ async def ws_global(websocket: WebSocket) -> None:
         await websocket.send_json(
             {
                 "type": "snapshot",
-                "records": [r.model_dump(mode="json") for r in mgr.list_jobs()],
+                "jobs": [
+                    r.with_download_urls().model_dump(mode="json")
+                    for r in mgr.list_jobs()
+                ],
             }
         )
     except Exception:  # noqa: BLE001

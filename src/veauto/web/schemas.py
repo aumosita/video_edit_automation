@@ -124,6 +124,29 @@ class JobRecord(BaseModel):
     num_subtitles: int | None = None
     kept_duration: float | None = None
     removed_duration: float | None = None
+    # Computed at serialisation time — see ``_attach_urls``.
+    fcpxml_url: str | None = None
+    report_md_url: str | None = None
+    report_json_url: str | None = None
+
+    def with_download_urls(self) -> JobRecord:
+        """Return a shallow copy whose ``*_url`` fields point at this
+        server's download endpoints. The base ``/api`` path is the same
+        regardless of how the SPA was opened (``localhost`` or
+        ``127.0.0.1``) because the browser resolves it against its own
+        origin.
+
+        Setting the URLs on a copy avoids mutating the canonical record
+        that other WS subscribers might still be looking at.
+        """
+        base = "/api/jobs/" + self.id + "/download/"
+        return self.model_copy(
+            update={
+                "fcpxml_url": base + self.fcpxml_name if self.fcpxml_name else None,
+                "report_md_url": base + self.report_md_name if self.report_md_name else None,
+                "report_json_url": base + self.report_json_name if self.report_json_name else None,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
