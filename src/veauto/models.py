@@ -188,11 +188,54 @@ class PipelineConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Path) -> PipelineConfig:
-        """Load a YAML config file and return a PipelineConfig instance."""
+        """Load a YAML config file and return a PipelineConfig instance.
+
+        An empty / missing ``silence`` or ``subtitle`` block is allowed; the
+        corresponding sub-config will use its defaults. Unknown keys are
+        silently ignored (Pydantic default ``extra='ignore'``); invalid
+        *types* still raise a :class:`pydantic.ValidationError`.
+        """
+
+        text = Path(path).read_text(encoding="utf-8")
+        return cls.from_yaml_string(text)
+
+    @classmethod
+    def from_yaml_string(cls, text: str) -> PipelineConfig:
+        """Parse a YAML string into a :class:`PipelineConfig`."""
         import yaml
 
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(text) or {}
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"PipelineConfig YAML must be a mapping, got {type(data).__name__}"
+            )
         return cls.model_validate(data)
+
+    def to_yaml(self, *, sort_keys: bool = False) -> str:
+        """Serialize this config to a YAML string.
+
+        Parameters
+        ----------
+        sort_keys:
+            If True, keys are sorted alphabetically (useful for stable
+            diffs in tests and version control). Defaults to False to
+            preserve the natural field order.
+        """
+        import yaml
+
+        data = self.model_dump(mode="json")
+        return yaml.safe_dump(
+            data,
+            sort_keys=sort_keys,
+            allow_unicode=True,
+            default_flow_style=False,
+        )
+
+    def write_yaml(self, path: Path, *, sort_keys: bool = False) -> None:
+        """Write this config to a YAML file."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.to_yaml(sort_keys=sort_keys), encoding="utf-8")
 
 
 
