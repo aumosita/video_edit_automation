@@ -35,3 +35,12 @@ tests/output/
 htmlcov/
 .pytest_cache/
 .ruff_cache/
+
+# Web client (Svelte + Vite)
+web/frontend/node_modules/
+web/frontend/.svelte-kit/
+web/frontend/dist/
+web/frontend/.vite/
+
+# Runtime data created by `veauto serve`
+veauto-data/
