@@ -1,0 +1,188 @@
+"""Tests for veauto.segments (pure logic, no ffmpeg)."""
+
+from __future__ import annotations
+
+import pytest
+
+from veauto.models import SilenceInterval
+from veauto.segments import (
+    _expand_with_margin,
+    _merge_overlapping,
+    build_cut_segments,
+)
+
+
+def test_merge_overlapping_empty():
+    assert _merge_overlapping([]) == []
+
+
+def test_merge_overlapping_singles():
+    ivs = [SilenceInterval(start=1.0, end=2.0)]
+    out = _merge_overlapping(ivs)
+    assert len(out) == 1
+    assert out[0].start == 1.0
+    assert out[0].end == 2.0
+
+
+def test_merge_overlapping_overlap():
+    ivs = [
+        SilenceInterval(start=1.0, end=3.0),
+        SilenceInterval(start=2.0, end=4.0),
+    ]
+    out = _merge_overlapping(ivs)
+    assert len(out) == 1
+    assert out[0].start == 1.0
+    assert out[0].end == 4.0
+
+
+def test_merge_overlapping_adjacent():
+    ivs = [
+        SilenceInterval(start=1.0, end=2.0),
+        SilenceInterval(start=2.0, end=3.0),
+    ]
+    out = _merge_overlapping(ivs)
+    assert len(out) == 1
+    assert out[0].end == 3.0
+
+
+def test_merge_overlapping_separated():
+    ivs = [
+        SilenceInterval(start=1.0, end=2.0),
+        SilenceInterval(start=4.0, end=5.0),
+    ]
+    out = _merge_overlapping(ivs)
+    assert len(out) == 2
+
+
+def test_merge_overlapping_unsorted_input():
+    ivs = [
+        SilenceInterval(start=4.0, end=5.0),
+        SilenceInterval(start=1.0, end=2.0),
+    ]
+    out = _merge_overlapping(ivs)
+    assert len(out) == 2
+    assert out[0].start == 1.0
+    assert out[1].start == 4.0
+
+
+def test_expand_with_margin_empty():
+    assert _expand_with_margin([], margin=0.2, total_duration=10.0) == []
+
+
+def test_expand_with_margin_zero_margin():
+    ivs = [SilenceInterval(start=3.0, end=5.0)]
+    out = _expand_with_margin(ivs, margin=0.0, total_duration=10.0)
+    assert len(out) == 1
+    assert out[0].start == 3.0
+    assert out[0].end == 5.0
+
+
+def test_expand_with_margin_basic():
+    ivs = [SilenceInterval(start=3.0, end=5.0)]
+    out = _expand_with_margin(ivs, margin=0.2, total_duration=10.0)
+    assert len(out) == 1
+    assert out[0].start == pytest.approx(2.8)
+    assert out[0].end == pytest.approx(5.2)
+
+
+def test_expand_with_margin_clamps_to_zero():
+    ivs = [SilenceInterval(start=0.1, end=0.5)]
+    out = _expand_with_margin(ivs, margin=1.0, total_duration=10.0)
+    assert out[0].start == 0.0
+    assert out[0].end == pytest.approx(1.5)
+
+
+def test_expand_with_margin_clamps_to_total():
+    ivs = [SilenceInterval(start=9.5, end=9.9)]
+    out = _expand_with_margin(ivs, margin=1.0, total_duration=10.0)
+    assert out[0].start == pytest.approx(8.5)
+    assert out[0].end == 10.0
+
+
+def test_expand_with_margin_merges_overlapping_after_expand():
+    ivs = [
+        SilenceInterval(start=2.0, end=3.0),
+        SilenceInterval(start=3.0, end=4.0),
+    ]
+    out = _expand_with_margin(ivs, margin=0.2, total_duration=10.0)
+    assert len(out) == 1
+    assert out[0].start == pytest.approx(1.8)
+    assert out[0].end == pytest.approx(4.2)
+
+
+def test_build_no_silence_returns_full():
+    kept, removed = build_cut_segments(10.0, [], margin=0.2)
+    assert len(kept) == 1
+    assert kept[0].source_in == 0.0
+    assert kept[0].source_out == 10.0
+    assert removed == []
+
+
+def test_build_single_silence_with_margin():
+    sils = [SilenceInterval(start=3.0, end=5.0)]
+    kept, removed = build_cut_segments(10.0, sils, margin=0.2)
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 2.8), (5.2, 10.0)]
+    assert [(r.source_in, r.source_out) for r in removed] == [(3.0, 5.0)]
+
+
+def test_build_single_silence_zero_margin():
+    sils = [SilenceInterval(start=3.0, end=5.0)]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.0)
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 3.0), (5.0, 10.0)]
+
+
+def test_build_two_silences():
+    sils = [
+        SilenceInterval(start=2.0, end=3.0),
+        SilenceInterval(start=5.0, end=6.0),
+    ]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.2)
+    assert [(c.source_in, c.source_out) for c in kept] == [
+        (0.0, 1.8), (3.2, 4.8), (6.2, 10.0)
+    ]
+
+
+def test_build_margin_merges_close_silences():
+    sils = [
+        SilenceInterval(start=2.0, end=3.0),
+        SilenceInterval(start=3.0, end=4.0),
+    ]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.2)
+    assert [(c.source_in, c.source_out) for c in kept] == [
+        (0.0, 1.8), (4.2, 10.0)
+    ]
+
+
+def test_build_leading_silence():
+    sils = [SilenceInterval(start=0.0, end=2.0)]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.2)
+    assert [(c.source_in, c.source_out) for c in kept] == [(2.2, 10.0)]
+
+
+def test_build_trailing_silence():
+    sils = [SilenceInterval(start=8.0, end=10.0)]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.2)
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 7.8)]
+
+
+def test_build_silence_covers_entire_file():
+    sils = [SilenceInterval(start=0.0, end=10.0)]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.0)
+    assert kept == []
+
+
+def test_build_zero_duration_returns_empty():
+    kept, removed = build_cut_segments(0.0, [], margin=0.2)
+    assert kept == []
+    assert removed == []
+
+
+def test_build_out_of_bounds_silences_filtered():
+    sils = [
+        SilenceInterval(start=3.0, end=5.0),
+        SilenceInterval(start=0.0, end=2.0),
+        SilenceInterval(start=8.0, end=20.0),
+    ]
+    kept, removed = build_cut_segments(10.0, sils, margin=0.0)
+    assert [(c.source_in, c.source_out) for c in kept] == [(2.0, 3.0), (5.0, 8.0)]
+    assert [(r.source_in, r.source_out) for r in removed] == [(3.0, 5.0), (0.0, 2.0)]
