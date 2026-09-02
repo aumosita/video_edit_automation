@@ -400,12 +400,14 @@ class TestFcpFormatId:
         uid so Final Cut Pro recognises it as a built-in title.
         Earlier we emitted ``.../veauto.Subtitle.built-in`` which FCP
         rejected as "item could not be read". We also tried the
-        ``Centered`` Build In/Out effect, which is a *transition*
-        template — FCP loads it but the title shows no text. We
-        now use ``Basic Title``, which is the plain centred title
-        that ships in
-        ``Final Cut Pro.app/.../PETemplates.localized/Titles.localized/
-        Bumper:Opener.localized/Basic Title.localized/Basic Title.moti``.
+        ``Centered`` Build In/Out effect (transition, no text) and
+        ``Basic Title`` (text rendered too small and centred).
+        We now use ``Lower Third Text``, which FCP ships in
+        ``Final Cut Pro.app/.../METemplates.localized/Titles.localized/
+        Basic Text.localized/Lower Third Text.localized/Lower Third
+        Text.moti`` — its default style is a single large line of
+        white text on a dark bar in the lower third, which is
+        what most users mean by a "YouTube-style caption".
         """
         media = _make_media()
         cuts = [CutSegment(source_in=0.0, source_out=10.0)]
@@ -420,9 +422,9 @@ class TestFcpFormatId:
             f"effect uid should follow Apple's .../Titles.localized/... pattern; "
             f"got {uid!r}"
         )
-        assert "Basic Title" in uid, (
-            f"effect uid should reference the 'Basic Title' template "
-            f"so FCP renders actual text; got {uid!r}"
+        assert "Lower Third Text" in uid, (
+            f"effect uid should reference the 'Lower Third Text' template "
+            f"so FCP renders a YouTube-style caption; got {uid!r}"
         )
         assert uid.endswith(".moti")
 

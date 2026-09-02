@@ -454,12 +454,12 @@ class JobManager:
             _enter("post_extract_audio")
             return res
 
-        def _transcribe(audio_path, sub_cfg):
+        def _transcribe(audio_path, sub_cfg, **kwargs):
             _check()
             _enter("transcribe")
             progress("transcribing", 0.40,
                      f"Transcribing (model={sub_cfg.model})…")
-            words = orig_transcribe(audio_path, sub_cfg)
+            words = orig_transcribe(audio_path, sub_cfg, **kwargs)
             _enter("post_transcribe")
             progress("transcribing", 0.75, f"Transcribed {len(words)} words")
             return words

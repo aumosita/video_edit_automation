@@ -15,9 +15,9 @@ Current shape
       <resources>
         <format id="FFVideoFormat1920x1080p30" .../>
         <asset .../>
-        <effect id="r3" name="Basic Title"
-                uid=".../Titles.localized/Bumper:Opener.localized/
-                    Basic Title.localized/Basic Title.moti"/>
+        <effect id="r3" name="Lower Third Text"
+                uid=".../Titles.localized/Basic Text.localized/
+                    Lower Third Text.localized/Lower Third Text.moti"/>
       </resources>
       <library>
         <event name="...">
@@ -178,21 +178,26 @@ def _build_resources(media, asset_id, effect_id):
 
     # Stub effect so <title ref="..."> can point at it. The DTD
     # declares ``<effect id ID #REQUIRED uid CDATA #REQUIRED>``,
-    # so both attributes are mandatory. We use the Motion
-    # "Basic Title" template that ships with Final Cut Pro and
-    # iMovie — the same template FCP uses for the Insert > Titles
-    # > Basic Title menu. Its UID is verified to exist in
-    # ``/Applications/Final Cut Pro.app/.../PETemplates.localized/
-    # Titles.localized/Bumper:Opener.localized/Basic Title.localized/
-    # Basic Title.moti`` and it renders text (a plain centered
-    # title) rather than a transition effect.
+    # so both attributes are mandatory.
+    #
+    # We use the Motion "Lower Third Text" template (verified to
+    # exist in
+    # ``Final Cut Pro.app/.../METemplates.localized/Titles.localized/
+    # Basic Text.localized/Lower Third Text.localized/Lower Third
+    # Text.moti``) because its default style is the closest thing
+    # to a YouTube caption we can get without giving up on
+    # FCP's title-effect mechanism: a single line of large white
+    # text on a translucent dark bar in the lower third of the
+    # frame. The previous "Basic Title" template rendered the
+    # text far too small and centred, which is why the user
+    # asked for an explicit YouTube-style alternative.
     effect = etree.SubElement(resources, "effect")
     effect.set("id", effect_id)
-    effect.set("name", "Basic Title")
+    effect.set("name", "Lower Third Text")
     effect.set(
         "uid",
-        ".../Titles.localized/Bumper:Opener.localized/"
-        "Basic Title.localized/Basic Title.moti",
+        ".../Titles.localized/Basic Text.localized/"
+        "Lower Third Text.localized/Lower Third Text.moti",
     )
 
     return resources, fmt_id

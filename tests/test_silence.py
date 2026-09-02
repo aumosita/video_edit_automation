@@ -140,6 +140,90 @@ def test_probe_duration_on_synthetic_wav(tmp_path):
     assert 1.9 < duration < 2.5, f"Expected ~2s, got {duration}"
 
 
+# ---------------------------------------------------------------------------
+# Voice Activity Detection (B2 — sync fix)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectVoiceRanges:
+    """``detect_voice_ranges`` returns the complement of
+    ``detect_silence`` — the non-silent ranges — so the pipeline
+    can snap STT-derived subtitle timestamps onto real audio
+    onsets.
+    """
+
+    def test_empty_silence_gives_one_full_range(self, monkeypatch):
+        from veauto import silence as sl
+        from veauto.models import SilenceConfig, VoiceRange
+
+        monkeypatch.setattr(sl, "detect_silence", lambda *a, **k: [])
+        voices = sl.detect_voice_ranges(
+            _DummyPath(), SilenceConfig(noise_db=-30.0, min_silence=0.5),
+            total_duration=10.0,
+        )
+        assert voices == [VoiceRange(source_in=0.0, source_out=10.0)]
+
+    def test_complement_of_silence(self, monkeypatch):
+        from veauto import silence as sl
+        from veauto.models import SilenceConfig, SilenceInterval, VoiceRange
+
+        silences = [SilenceInterval(start=2.0, end=4.0),
+                    SilenceInterval(start=7.0, end=8.0)]
+        monkeypatch.setattr(sl, "detect_silence", lambda *a, **k: silences)
+        voices = sl.detect_voice_ranges(
+            _DummyPath(), SilenceConfig(noise_db=-30.0, min_silence=0.5),
+            total_duration=10.0,
+        )
+        assert voices == [
+            VoiceRange(source_in=0.0, source_out=2.0),
+            VoiceRange(source_in=4.0, source_out=7.0),
+            VoiceRange(source_in=8.0, source_out=10.0),
+        ]
+
+    def test_zero_duration_returns_empty(self, monkeypatch):
+        from veauto import silence as sl
+        from veauto.models import SilenceConfig
+        monkeypatch.setattr(sl, "detect_silence", lambda *a, **k: [])
+        assert sl.detect_voice_ranges(
+            _DummyPath(), SilenceConfig(noise_db=-30.0, min_silence=0.5),
+            total_duration=0.0,
+        ) == []
+
+
+class TestSnapToVoice:
+    """``snap_to_voice`` adjusts a single timestamp onto the
+    nearest real audio edge, with a configurable snap window.
+    """
+
+    def test_timestamp_inside_voice_unchanged(self):
+        from veauto.models import VoiceRange
+        from veauto.silence import snap_to_voice
+        voices = [VoiceRange(source_in=0.0, source_out=10.0)]
+        assert snap_to_voice(5.0, voices) == 5.0
+
+    def test_timestamp_near_edge_snaps(self):
+        from veauto.models import VoiceRange
+        from veauto.silence import snap_to_voice
+        voices = [VoiceRange(source_in=2.0, source_out=4.0),
+                  VoiceRange(source_in=6.0, source_out=8.0)]
+        # 0.1 s before a voice edge → snap to it.
+        assert snap_to_voice(1.9, voices) == 2.0
+        # Outside the snap window (0.4 s default) → keep.
+        assert snap_to_voice(1.5, voices) == 1.5
+
+    def test_no_voice_ranges_keeps_timestamp(self):
+        from veauto.silence import snap_to_voice
+        assert snap_to_voice(3.0, []) == 3.0
+
+
+class _DummyPath:
+    """Path stand-in that lets us exercise ``detect_voice_ranges``
+    without invoking the real ``detect_silence`` subprocess.
+    """
+    def __fspath__(self):
+        return "/dev/null"
+
+
 @FFMPEG_SKIP
 def test_detect_silence_no_silence_returns_empty(tmp_path):
     ffmpeg = shutil.which("ffmpeg")

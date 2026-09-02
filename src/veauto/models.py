@@ -95,6 +95,23 @@ class RemovedSilence(BaseModel):
         return self.source_out - self.source_in
 
 
+class VoiceRange(BaseModel):
+    """A non-silent region in the source media (VAD output).
+
+    Returned by :func:`veauto.silence.detect_voice_ranges`. The
+    pipeline uses these to snap subtitle timestamps onto real
+    audio onsets, which fixes the residual 100-300 ms drift that
+    faster-whisper leaves behind.
+    """
+
+    source_in: float
+    source_out: float
+
+    @property
+    def duration(self) -> float:
+        return self.source_out - self.source_in
+
+
 SubtitlePosition = Literal["top", "center", "bottom"]
 
 

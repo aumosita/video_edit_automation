@@ -249,6 +249,7 @@ def transcribe_with_model(
     beam_size: int = 5,
     vad_filter: bool = False,
     word_timestamps: bool = True,
+    condition_on_previous_text: bool = True,
 ) -> list[Word]:
     """Run inference on an already-loaded ``WhisperModel``-like instance.
 
@@ -263,6 +264,7 @@ def transcribe_with_model(
         beam_size=beam_size,
         vad_filter=vad_filter,
         word_timestamps=word_timestamps,
+        condition_on_previous_text=condition_on_previous_text,
     )
 
     words: list[Word] = []
@@ -294,12 +296,27 @@ def transcribe(
     config: SubtitleConfig,
     *,
     model_factory: Callable[..., Any] | None = None,
+    vad_filter: bool | None = None,
+    condition_on_previous_text: bool | None = None,
 ) -> list[Word]:
     """Transcribe ``audio_path`` and return ``list[Word]``.
 
     ``model_factory`` must accept ``(model_size, device, compute_type)`` and
     return an object exposing ``.transcribe(...)``. If ``None``, the real
     ``faster_whisper.WhisperModel`` is used.
+
+    The ``vad_filter`` and ``condition_on_previous_text`` kwargs, when
+    not ``None``, override the (currently absent) defaults on
+    ``config``. They are the two fastest wins for *timing accuracy*:
+
+    * ``vad_filter=True`` makes faster-whisper run its built-in
+      Silero VAD before decoding, which clips hallucinations to
+      non-speech regions and brings word timestamps much closer to
+      the actual audio energy.
+    * ``condition_on_previous_text=True`` lets the decoder reuse
+      the previous segment's text as a soft prompt, which both
+      speeds up decoding and reduces the long-tail timing drift
+      that bites long videos.
     """
     device = resolve_device(config.device)
     compute_type = resolve_compute_type(device, config.compute_type)
@@ -310,6 +327,11 @@ def transcribe(
         audio_path,
         language=config.language,
         beam_size=config.beam_size,
+        vad_filter=True if vad_filter is None else bool(vad_filter),
+        condition_on_previous_text=(
+            True if condition_on_previous_text is None
+            else bool(condition_on_previous_text)
+        ),
     )
 
 

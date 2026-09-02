@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import SilenceConfig, SilenceInterval
+from .models import SilenceConfig, SilenceInterval, VoiceRange
 
 # How long (seconds) to wait between cancel polls while a subprocess is
 # running. 50 ms is small enough to feel snappy in the UI but large
@@ -311,3 +311,74 @@ def detect_silence(
         should_cancel=should_cancel,
     )
     return intervals
+
+
+def detect_voice_ranges(
+    path: Path,
+    config: SilenceConfig,
+    *,
+    total_duration: float,
+    audio_stream: int | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> list[VoiceRange]:
+    """Return the *non-silent* ranges of ``path`` (Voice Activity Detection).
+
+    This is the complement of :func:`detect_silence`: a voice range is
+    any interval *between* two silence intervals (or between the start
+    of the media and the first silence, or between the last silence
+    and the end of the media). The result is sorted and non-overlapping.
+
+    Used by the pipeline to snap subtitle ``start`` / ``end`` timestamps
+    onto the nearest real audio onset / offset, so STT timing drift
+    does not desync the captions from the speech.
+    """
+    if total_duration <= 0:
+        return []
+
+    silences = detect_silence(
+        path,
+        config,
+        audio_stream=audio_stream,
+        should_cancel=should_cancel,
+    )
+
+    voice: list[VoiceRange] = []
+    cursor = 0.0
+    for s in silences:
+        if s.start > cursor + 1e-3:
+            voice.append(VoiceRange(source_in=cursor, source_out=s.start))
+        cursor = max(cursor, s.end)
+    if cursor < total_duration - 1e-3:
+        voice.append(VoiceRange(source_in=cursor, source_out=total_duration))
+    return voice
+
+
+def snap_to_voice(
+    t: float,
+    voice_ranges: list[VoiceRange],
+    *,
+    snap_window: float = 0.4,
+) -> float:
+    """Snap a single timestamp onto the nearest voice range.
+
+    If ``t`` is already inside a voice range, return it unchanged.
+    If it's within ``snap_window`` of a voice edge, snap to the
+    edge. Otherwise return ``t`` unchanged — we never pull a
+    subtitle arbitrarily far from its STT time, since that
+    would mask real timing errors rather than fix drift.
+    """
+    if not voice_ranges:
+        return t
+    best = t
+    best_dist = float("inf")
+    for vr in voice_ranges:
+        for edge in (vr.source_in, vr.source_out):
+            d = abs(t - edge)
+            if d < best_dist:
+                best_dist = d
+                best = edge
+        if vr.source_in - 1e-6 <= t <= vr.source_out + 1e-6:
+            return t
+    if best_dist <= snap_window:
+        return best
+    return t

@@ -29,6 +29,7 @@ from .models import (
     MediaInfo,
     PipelineConfig,
     RemovedSilence,
+    SilenceConfig,
     SubtitleSegment,
     Word,
 )
@@ -213,7 +214,16 @@ def run_pipeline(
             result.audio_path = audio_path
 
             t = transcriber or _transcribe
-            words = t(audio_path, config.subtitle)
+            # B1: enable the two faster-whisper flags that most
+            # improve *timing* accuracy: VAD prunes hallucinations
+            # to speech regions, and conditioning on the previous
+            # segment reduces long-tail drift.
+            words = t(
+                audio_path,
+                config.subtitle,
+                vad_filter=True,
+                condition_on_previous_text=True,
+            )
             result.words = words
             result.subtitles = words_to_subtitle_segments(
                 words,
@@ -222,6 +232,26 @@ def run_pipeline(
                 min_duration=config.subtitle.style.min_duration,
                 max_duration=config.subtitle.style.max_duration,
             )
+
+            # B2: snap every subtitle to the nearest real audio
+            # onset / offset so the captions land on the actual
+            # speech, not on faster-whisper's 100-300 ms drift.
+            try:
+                from .silence import detect_voice_ranges, snap_to_voice
+                voice = detect_voice_ranges(
+                    input_path,
+                    SilenceConfig(
+                        noise_db=config.silence.noise_db,
+                        min_silence=config.silence.min_silence,
+                        enabled=True,
+                    ),
+                    total_duration=result.media.duration,
+                )
+                for sub in result.subtitles:
+                    sub.start = snap_to_voice(sub.start, voice)
+                    sub.end = snap_to_voice(sub.end, voice)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug("voice-snap failed, using STT times: %s", exc)
 
     # 3. Render FCPXML (must use ORIGINAL-timeline subtitles so
     # the per-cut pairing in fcpxml_builder sees matching

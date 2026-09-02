@@ -50,13 +50,17 @@ class _FakeWhisperModel:
         self._segments = segments
         self.calls: dict[str, Any] = {}
 
-    def transcribe(self, audio, *, language, beam_size, vad_filter, word_timestamps):
+    def transcribe(
+        self, audio, *, language, beam_size, vad_filter,
+        word_timestamps, condition_on_previous_text,
+    ):
         self.calls = {
             "audio": audio,
             "language": language,
             "beam_size": beam_size,
             "vad_filter": vad_filter,
             "word_timestamps": word_timestamps,
+            "condition_on_previous_text": condition_on_previous_text,
         }
         return iter(self._segments), SimpleNamespace(language=language)
 

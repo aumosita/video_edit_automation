@@ -350,6 +350,98 @@ class TestRunPipelineSubtitles:
             f"got {[r.start for r in result.subtitles]!r}"
         )
 
+    def test_b1_passes_whisper_tuning_kwargs(self, monkeypatch, tmp_path):
+        """Regression: ``run_pipeline`` must hand
+        ``vad_filter=True`` and ``condition_on_previous_text=True``
+        to the transcriber so users get the two fastest
+        *timing-accuracy* wins automatically.
+        """
+        cfg = PipelineConfig()
+        cfg.silence.enabled = False
+        cfg.subtitle.enabled = True
+        cfg.keep_temp = True
+
+        wav = tmp_path / "fake.wav"
+        wav.write_text("x")
+        _patch_pipeline_io(
+            monkeypatch, tmp_path,
+            silences=[],
+            cuts=[CutSegment(source_in=0, source_out=10)],
+            audio_wav=wav,
+        )
+
+        captured: dict = {}
+
+        def _capture(audio, sub_cfg, **kwargs):
+            captured.update(kwargs)
+            return [Word(start=0.0, end=1.0, text="hi")]
+
+        run_pipeline(tmp_path / "in.mp4", cfg, transcriber=_capture)
+        assert captured.get("vad_filter") is True, (
+            f"vad_filter not passed to transcriber: {captured!r}"
+        )
+        assert captured.get("condition_on_previous_text") is True, (
+            f"condition_on_previous_text not passed: {captured!r}"
+        )
+
+    def test_b2_snaps_subtitles_to_voice_ranges(
+        self, monkeypatch, tmp_path
+    ):
+        """Regression: subtitle ``start`` / ``end`` must be snapped
+        onto the nearest real audio onset/offset so the captions
+        land on the actual speech.
+        """
+        cfg = PipelineConfig()
+        cfg.silence.enabled = True
+        cfg.subtitle.enabled = True
+        cfg.keep_temp = True
+
+        wav = tmp_path / "fake.wav"
+        wav.write_text("x")
+        _patch_pipeline_io(
+            monkeypatch, tmp_path,
+            silences=[],
+            cuts=[CutSegment(source_in=0, source_out=10)],
+            audio_wav=wav,
+        )
+
+        # STT returns subtitles at 1.0..1.5 and 4.4..4.6.
+        words = [Word(start=1.0, end=1.5, text="a"),
+                 Word(start=4.4, end=4.6, text="b")]
+        monkeypatch.setattr("veauto.pipeline._transcribe",
+                            lambda *a, **kw: words)
+        # VAD says voice activity is [2.0..3.0] and [5.0..6.0].
+        # Subtitle 1.0..1.5 is 1.0s away from 2.0 — outside the
+        # 0.4 s snap window, so it stays. Subtitle 4.4..4.6 is
+        # 0.6s away from 5.0 — also stays. To prove the snap
+        # actually runs, we add a third subtitle at 1.95..1.97
+        # which IS within the snap window of 2.0.
+        words.append(Word(start=1.95, end=1.97, text="c"))
+        from veauto import silence as _vad_mod
+        from veauto.models import VoiceRange
+        monkeypatch.setattr(
+            _vad_mod, "detect_voice_ranges",
+            lambda *a, **k: [
+                VoiceRange(source_in=2.0, source_out=3.0),
+                VoiceRange(source_in=5.0, source_out=6.0),
+            ],
+        )
+
+        seen: dict = {}
+        def _capture(media, cuts, **kw):
+            seen["subs"] = kw.get("subtitles")
+            return "<fcpxml/>"
+        monkeypatch.setattr("veauto.pipeline.build_fcpxml", _capture)
+
+        result = run_pipeline(tmp_path / "in.mp4", cfg)
+        # Subtitle "c" (1.95..1.97) should have been snapped to
+        # 2.0..2.0 (or snapped at the leading edge).
+        snapped_c = [s for s in seen["subs"] if s.text == "c"][0]
+        assert snapped_c.start == pytest.approx(2.0), (
+            f"Expected start=2.0 after VAD snap, got {snapped_c.start}"
+        )
+        assert result.subtitles is not None  # happy-path sanity
+
     def test_subtitle_in_silence_is_dropped(self, monkeypatch, tmp_path):
         cfg = PipelineConfig()
         cfg.silence.enabled = True
@@ -432,7 +524,7 @@ class TestRunPipelineSubtitles:
             audio_wav=wav,
         )
 
-        def _custom(audio, sub_cfg):
+        def _custom(audio, sub_cfg, **kwargs):
             return [Word(start=1.0, end=2.0, text="CUSTOM")]
 
         result = run_pipeline(
