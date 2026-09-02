@@ -223,10 +223,11 @@ def run_pipeline(
                 max_duration=config.subtitle.style.max_duration,
             )
 
-            if result.cuts:
-                result.subtitles = remap_subtitles(result.cuts, result.subtitles)
-
-    # 3. Render FCPXML
+    # 3. Render FCPXML (must use ORIGINAL-timeline subtitles so
+    # the per-cut pairing in fcpxml_builder sees matching
+    # source_in / source_out vs subtitle.start / subtitle.end).
+    # The remap for the report runs *after* this so the report
+    # shows the user-facing compacted timeline.
     result.fcpxml = build_fcpxml(
         result.media,
         result.cuts,
@@ -235,6 +236,11 @@ def run_pipeline(
         project_name=config.output.project_name,
         event_name=config.output.event_name,
     )
+
+    # After the FCPXML is built, re-time the subtitles onto the
+    # compacted timeline for the human-readable report.
+    if result.cuts and result.subtitles:
+        result.subtitles = remap_subtitles(result.cuts, result.subtitles)
 
     # 4. Cleanup temp audio
     _cleanup_audio(audio_path, keep=config.keep_temp)

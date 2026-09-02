@@ -399,7 +399,13 @@ class TestFcpFormatId:
         """The effect must use a ``…/Titles.localized/…/…moti``
         uid so Final Cut Pro recognises it as a built-in title.
         Earlier we emitted ``.../veauto.Subtitle.built-in`` which FCP
-        rejected as "item could not be read".
+        rejected as "item could not be read". We also tried the
+        ``Centered`` Build In/Out effect, which is a *transition*
+        template — FCP loads it but the title shows no text. We
+        now use ``Basic Title``, which is the plain centred title
+        that ships in
+        ``Final Cut Pro.app/.../PETemplates.localized/Titles.localized/
+        Bumper:Opener.localized/Basic Title.localized/Basic Title.moti``.
         """
         media = _make_media()
         cuts = [CutSegment(source_in=0.0, source_out=10.0)]
@@ -414,4 +420,52 @@ class TestFcpFormatId:
             f"effect uid should follow Apple's .../Titles.localized/... pattern; "
             f"got {uid!r}"
         )
+        assert "Basic Title" in uid, (
+            f"effect uid should reference the 'Basic Title' template "
+            f"so FCP renders actual text; got {uid!r}"
+        )
         assert uid.endswith(".moti")
+
+
+class TestRemapCutsToCompactedTimeline:
+    """``_remap_cuts_to_compacted_timeline`` shifts cut ``source_in``
+    / ``source_out`` onto a 0-based compacted timeline, the same
+    transform :func:`remap_subtitles` applies to subtitle segments.
+    The two must live on the same timeline or the per-cut pairing
+    in ``_assign_subtitles_to_cuts`` silently mis-orders.
+    """
+
+    def test_empty_input_returns_empty(self):
+        from veauto.fcpxml_builder import _remap_cuts_to_compacted_timeline
+        assert _remap_cuts_to_compacted_timeline([]) == []
+
+    def test_single_cut_starts_at_zero(self):
+        from veauto.fcpxml_builder import _remap_cuts_to_compacted_timeline
+        cut = CutSegment(source_in=10.0, source_out=15.0)
+        out = _remap_cuts_to_compacted_timeline([cut])
+        assert len(out) == 1
+        assert out[0].source_in == 0.0
+        assert out[0].source_out == 5.0
+
+    def test_multiple_cuts_are_contiguous(self):
+        from veauto.fcpxml_builder import _remap_cuts_to_compacted_timeline
+        cuts = [
+            CutSegment(source_in=0.0, source_out=3.0),
+            CutSegment(source_in=4.0, source_out=10.0),
+            CutSegment(source_in=20.0, source_out=21.0),
+        ]
+        out = _remap_cuts_to_compacted_timeline(cuts)
+        assert [c.source_in for c in out] == [0.0, 3.0, 9.0]
+        assert [c.source_out for c in out] == [3.0, 9.0, 10.0]
+
+    def test_unordered_input_is_sorted(self):
+        from veauto.fcpxml_builder import _remap_cuts_to_compacted_timeline
+        # Cuts arrive out of order; the remap should still produce
+        # a contiguous 0-based timeline.
+        cuts = [
+            CutSegment(source_in=20.0, source_out=21.0),
+            CutSegment(source_in=0.0, source_out=3.0),
+            CutSegment(source_in=4.0, source_out=10.0),
+        ]
+        out = _remap_cuts_to_compacted_timeline(cuts)
+        assert [c.source_in for c in out] == [0.0, 3.0, 9.0]

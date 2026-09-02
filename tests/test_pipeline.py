@@ -290,6 +290,66 @@ class TestRunPipelineSubtitles:
         assert result.subtitles[-1].start == pytest.approx(5.0)
         assert result.subtitles[-1].end == pytest.approx(5.5)
 
+    def test_fcpxml_sees_original_timeline_subtitles(
+        self, monkeypatch, tmp_path
+    ):
+        """Regression: ``build_fcpxml`` must receive subtitles on
+        the ORIGINAL source timeline so the per-cut pairing inside
+        the builder matches each cut's source_in / source_out. If
+        the pipeline remaps subtitles before handing them to
+        build_fcpxml, the per-cut pairing silently mis-orders
+        everything — the long-standing "subtitle out of sync" bug.
+
+        The pipeline still remaps ``result.subtitles`` after the
+        FCPXML has been rendered so the user-visible report shows
+        the compacted timeline.
+        """
+        cfg = PipelineConfig()
+        cfg.silence.enabled = True
+        cfg.subtitle.enabled = True
+        cfg.keep_temp = True
+
+        wav = tmp_path / "fake.wav"
+        wav.write_text("x")
+        _patch_pipeline_io(
+            monkeypatch, tmp_path,
+            silences=[],
+            cuts=[
+                CutSegment(source_in=0, source_out=3),
+                CutSegment(source_in=4, source_out=10),
+            ],
+            audio_wav=wav,
+        )
+
+        seen: dict = {}
+
+        def _capture_fcpxml(media, cuts, **kw):
+            # Snapshot the subtitles the pipeline hands to the
+            # builder. They MUST still be on the source timeline.
+            seen["subs"] = list(kw.get("subtitles") or [])
+            seen["cuts"] = list(cuts)
+            return "<fcpxml/>"
+
+        monkeypatch.setattr("veauto.pipeline.build_fcpxml", _capture_fcpxml)
+        result = run_pipeline(tmp_path / "in.mp4", cfg)
+
+        # The FCPXML was rendered with original-timeline subtitles.
+        sub_starts = [s.start for s in seen["subs"]]
+        # Original-timeline cuts were [0..3] and [4..10]. A
+        # subtitle at source-time ~6.0 must be seen as 6.0, not
+        # its compacted-time 5.0.
+        assert any(abs(s - 6.0) < 1e-6 for s in sub_starts), (
+            f"FCPXML received compacted-time subtitles: {sub_starts!r}. "
+            f"This means subtitle pairing in fcpxml_builder will "
+            f"silently mis-orders, causing out-of-sync captions in FCP."
+        )
+        # The user-facing report still shows the compacted view.
+        assert any(abs(s - 5.0) < 1e-6 for s in
+                   [r.start for r in result.subtitles]), (
+            f"result.subtitles should be remapped for the report; "
+            f"got {[r.start for r in result.subtitles]!r}"
+        )
+
     def test_subtitle_in_silence_is_dropped(self, monkeypatch, tmp_path):
         cfg = PipelineConfig()
         cfg.silence.enabled = True

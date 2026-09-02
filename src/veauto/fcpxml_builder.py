@@ -13,15 +13,17 @@ Current shape
 
     <fcpxml version="1.10">
       <resources>
-        <format .../>
+        <format id="FFVideoFormat1920x1080p30" .../>
         <asset .../>
-        <effect id="r3" name="Centered"
-                uid=".../Titles.localized/.../Centered.moti"/>
+        <effect id="r3" name="Basic Title"
+                uid=".../Titles.localized/Bumper:Opener.localized/
+                    Basic Title.localized/Basic Title.moti"/>
       </resources>
       <library>
         <event name="...">
           <project name="...">
-            <sequence format="r1">
+            <sequence format="FFVideoFormat1920x1080p30"
+                      duration="..." tcStart="0s" tcFormat="NDF">
               <spine>
                 <asset-clip ...>
                   <title ref="r3" lane="1"
@@ -45,6 +47,8 @@ from __future__ import annotations
 
 from lxml import etree
 
+from .models import CutSegment
+
 _FCPXML_VERSION = "1.10"
 
 
@@ -60,6 +64,13 @@ def _rational_time(seconds: float, frame_rate: float) -> str:
 
 def _assign_subtitles_to_cuts(cuts, subtitles):
     """Pair each subtitle with the cut segment that contains it.
+
+    The ``cuts`` and ``subtitles`` must both be on the **same**
+    timeline — either the original source timeline, or the
+    compacted one produced by :func:`remap_subtitles`. Mixing
+    timelines (e.g. comparing a remap subtitle's start against a
+    raw cut's source_in) silently mis-orders everything and was
+    the source of a long-standing "subtitle out of sync" bug.
 
     Returns ``[(cut, [(sub, offset_within_cut_seconds), ...]), ...]``,
     sorted by subtitle start time within each cut.
@@ -78,6 +89,31 @@ def _assign_subtitles_to_cuts(cuts, subtitles):
         local.sort(key=lambda pair: pair[1])
         result.append((cut, local))
     return result
+
+
+def _remap_cuts_to_compacted_timeline(cuts):
+    """Return a copy of ``cuts`` with ``source_in`` / ``source_out``
+    shifted onto the compacted (silence-removed) timeline.
+
+    Useful when the caller already has remapped subtitles and
+    needs the cut segments to live on the same timeline for
+    pairing.
+    """
+    cuts_sorted = sorted(cuts, key=lambda c: c.source_in)
+    cumulative: list[float] = []
+    running = 0.0
+    for c in cuts_sorted:
+        cumulative.append(running)
+        running += c.duration
+    remapped = []
+    for c, base in zip(cuts_sorted, cumulative, strict=True):
+        remapped.append(
+            CutSegment(
+                source_in=base,
+                source_out=base + c.duration,
+            )
+        )
+    return remapped
 
 
 def _build_resources(media, asset_id, effect_id):
@@ -142,22 +178,21 @@ def _build_resources(media, asset_id, effect_id):
 
     # Stub effect so <title ref="..."> can point at it. The DTD
     # declares ``<effect id ID #REQUIRED uid CDATA #REQUIRED>``,
-    # so both attributes are mandatory. We use the well-known
-    # Motion "Centered" title UID that ships with Final Cut Pro
-    # and iMovie — the same pattern Apple uses in its own
-    # exports. FCP will resolve the ref to this built-in effect
-    # and ignore our inlined <text-style> (we accept that the
-    # title font is whatever FCP picks from this template, since
-    # a custom <text-style> cannot be applied to a built-in
-    # template via the public FCPXML 1.10 DTD). Position, size,
-    # and content are the parts the user actually sees.
+    # so both attributes are mandatory. We use the Motion
+    # "Basic Title" template that ships with Final Cut Pro and
+    # iMovie — the same template FCP uses for the Insert > Titles
+    # > Basic Title menu. Its UID is verified to exist in
+    # ``/Applications/Final Cut Pro.app/.../PETemplates.localized/
+    # Titles.localized/Bumper:Opener.localized/Basic Title.localized/
+    # Basic Title.moti`` and it renders text (a plain centered
+    # title) rather than a transition effect.
     effect = etree.SubElement(resources, "effect")
     effect.set("id", effect_id)
-    effect.set("name", "Centered")
+    effect.set("name", "Basic Title")
     effect.set(
         "uid",
-        ".../Titles.localized/Build In:Out.localized/"
-        "Centered.localized/Centered.moti",
+        ".../Titles.localized/Bumper:Opener.localized/"
+        "Basic Title.localized/Basic Title.moti",
     )
 
     return resources, fmt_id
