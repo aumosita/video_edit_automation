@@ -106,8 +106,25 @@ def _build_resources(media, asset_id, effect_id):
     fmt.set("id", fmt_id)
     fmt.set("name", fmt_id)
     fmt.set("frameDuration", f"1/{fr_int}s")
+    # FCP's strict importer often rejects <format> elements that are
+    # missing the standard attributes iMovie always emits. We set
+    # them all so the format is unambiguous on import.
+    fmt.set("fieldOrder", "progressive")
     fmt.set("width", str(media.width))
     fmt.set("height", str(media.height))
+    fmt.set("paspH", "1")
+    fmt.set("paspV", "1")
+    # Best-guess color space based on resolution. FCP will accept
+    # the value and re-encode media against the project setting
+    # if the source doesn't match.
+    if media.width >= 3840:
+        fmt.set("colorSpace", "9-16-9 (Rec. 2020)")
+    elif media.width >= 1920:
+        fmt.set("colorSpace", "1-1-1 (Rec. 709)")
+    else:
+        fmt.set("colorSpace", "6-1-6 (Rec. 601 (NTSC))")
+    fmt.set("projection", "none")
+    fmt.set("stereoscopic", "mono")
 
     asset = etree.SubElement(resources, "asset")
     asset.set("id", asset_id)
@@ -243,6 +260,12 @@ def build_fcpxml(
 
     sequence = etree.SubElement(project, "sequence")
     sequence.set("format", fmt_id)
+    # FCP's strict importer often expects the sequence to carry a
+    # duration, tcStart, and tcFormat even though the DTD marks
+    # them #IMPLIED. We emit them so the import is unambiguous.
+    sequence.set("duration", _rational_time(media.duration, media.frame_rate))
+    sequence.set("tcStart", "0s")
+    sequence.set("tcFormat", "NDF")
     cuts_with_subs = _assign_subtitles_to_cuts(cuts, subtitles or [])
     spine, _ = _build_spine(
         media, cuts_with_subs, asset_id, effect_id, subtitle_style

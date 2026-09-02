@@ -362,6 +362,39 @@ class TestFcpFormatId:
         assert sequence is not None
         assert sequence.get("format") == fmt_id
 
+    def test_format_has_standard_attributes(self):
+        """Final Cut Pro's strict importer requires the standard set
+        of attributes that iMovie always emits on a <format>
+        element. Without them FCP shows "Encountered an unexpected
+        value" even though the DTD marks them #IMPLIED.
+        """
+        media = _make_media()
+        xml = build_fcpxml(media, [])
+        root = ET.fromstring(xml)
+        fmt = root.find("resources/format")
+        assert fmt is not None
+        for attr in ("frameDuration", "fieldOrder", "width", "height",
+                     "paspH", "paspV", "colorSpace", "projection",
+                     "stereoscopic"):
+            assert fmt.get(attr) is not None, (
+                f"<format> must carry {attr!r} for FCP strict import"
+            )
+
+    def test_sequence_has_duration_and_tc_attrs(self):
+        """FCP's strict importer expects <sequence> to carry
+        ``duration``, ``tcStart``, and ``tcFormat`` even though the
+        DTD marks them #IMPLIED.
+        """
+        media = _make_media()
+        xml = build_fcpxml(media, [])
+        root = ET.fromstring(xml)
+        sequence = root.find("library/event/project/sequence")
+        assert sequence is not None
+        for attr in ("duration", "tcStart", "tcFormat"):
+            assert sequence.get(attr) is not None, (
+                f"<sequence> must carry {attr!r} for FCP strict import"
+            )
+
     def test_effect_uid_uses_apple_pattern(self):
         """The effect must use a ``…/Titles.localized/…/…moti``
         uid so Final Cut Pro recognises it as a built-in title.
