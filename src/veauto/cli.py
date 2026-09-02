@@ -122,6 +122,13 @@ def subtitles(
     style_max_lines: int = typer.Option(2, '--style-max-lines', min=1, max=4),
     style_min_duration: float = typer.Option(0.8, '--style-min-duration', min=0.1),
     style_max_duration: float = typer.Option(6.0, '--style-max-duration', min=0.5),
+    subtitle_offset: float = typer.Option(
+        0.0, '--subtitle-offset',
+        min=-2.0, max=2.0,
+        help='Manual subtitle timing offset in seconds '
+             '(positive = later, negative = earlier). '
+             'Applied after VAD snap and STT alignment.',
+    ),
     project_name: str = typer.Option('Auto Edit', '--project-name'),
     event_name: str = typer.Option('veauto', '--event-name'),
     keep_audio: bool = typer.Option(
@@ -159,6 +166,7 @@ def subtitles(
             device=device,  # type: ignore[arg-type]
             compute_type=compute_type,  # type: ignore[arg-type]
             beam_size=beam_size,
+            offset=subtitle_offset,
             style=style,
         )
 
@@ -176,6 +184,14 @@ def subtitles(
             max_duration=style.max_duration,
         )
         console.print(f'[bold]Subtitles:[/bold] {len(segments)} lines')
+
+        # Apply the manual timing offset (B4). The ``subtitles``
+        # subcommand doesn't go through run_pipeline, so we apply
+        # the offset here ourselves.
+        if subtitle_offset:
+            for s in segments:
+                s.start = max(0.0, s.start + subtitle_offset)
+                s.end = max(s.start + 0.01, s.end + subtitle_offset)
 
         kept = [CutSegment(source_in=0.0, source_out=media.duration)]
         xml = build_fcpxml(
@@ -210,6 +226,13 @@ def run(
     device: str = typer.Option('auto', '--device'),
     compute_type: str = typer.Option('auto', '--compute-type'),
     beam_size: int = typer.Option(5, '--beam-size', min=1, max=20),
+    subtitle_offset: float = typer.Option(
+        0.0, '--subtitle-offset',
+        min=-2.0, max=2.0,
+        help='Manual subtitle timing offset in seconds '
+             '(positive = later, negative = earlier). '
+             'Applied after VAD snap and STT alignment.',
+    ),
     # Subtitle style
     style_position: str = typer.Option('bottom', '--style-position'),
     style_font: str = typer.Option('Apple SD Gothic Neo', '--style-font'),
@@ -286,6 +309,7 @@ def run(
     cfg.subtitle.device = device  # type: ignore[assignment]
     cfg.subtitle.compute_type = compute_type  # type: ignore[assignment]
     cfg.subtitle.beam_size = beam_size
+    cfg.subtitle.offset = subtitle_offset
 
     cfg.subtitle.style.position = style_position  # type: ignore[assignment]
     cfg.subtitle.style.font = style_font

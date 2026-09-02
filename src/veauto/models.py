@@ -187,6 +187,19 @@ class SubtitleConfig(BaseModel):
     device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
     compute_type: Literal["auto", "int8", "int8_float16", "float16", "float32"] = "auto"
     beam_size: int = Field(default=5, ge=1, le=20)
+    offset: float = Field(
+        default=0.0,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "Manual subtitle timing offset in seconds. "
+            "Positive values make captions appear later (useful when "
+            "the source video's audio leads the video track by a known "
+            "amount); negative values make them appear earlier. "
+            "Applied as the final step in the pipeline, after STT and "
+            "after the VAD-based snap-to-voice correction."
+        ),
+    )
     style: SubtitleStyle = Field(default_factory=SubtitleStyle)
 
 

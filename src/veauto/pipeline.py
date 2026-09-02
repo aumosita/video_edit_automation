@@ -236,8 +236,16 @@ def run_pipeline(
             # B2: snap every subtitle to the nearest real audio
             # onset / offset so the captions land on the actual
             # speech, not on faster-whisper's 100-300 ms drift.
+            # The snap window is 0.7 s, which reliably absorbs
+            # faster-whisper's well-known "early onset" tendency
+            # (the decoder fires word starts 100-500 ms before the
+            # true audio energy rises) while still rejecting
+            # genuine STT errors.
             try:
-                from .silence import detect_voice_ranges, snap_to_voice
+                from .silence import (
+                    detect_voice_ranges,
+                    shift_subtitle_timestamps,
+                )
                 voice = detect_voice_ranges(
                     input_path,
                     SilenceConfig(
@@ -247,11 +255,17 @@ def run_pipeline(
                     ),
                     total_duration=result.media.duration,
                 )
-                for sub in result.subtitles:
-                    sub.start = snap_to_voice(sub.start, voice)
-                    sub.end = snap_to_voice(sub.end, voice)
+                shift_subtitle_timestamps(result.subtitles, voice)
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.debug("voice-snap failed, using STT times: %s", exc)
+
+            # B4: apply the user-controlled manual timing offset.
+            # Done *after* the VAD snap so the offset is interpreted
+            # in absolute terms, not "relative to the VAD edge".
+            if config.subtitle.offset:
+                for sub in result.subtitles:
+                    sub.start = max(0.0, sub.start + config.subtitle.offset)
+                    sub.end = max(sub.start + 0.01, sub.end + config.subtitle.offset)
 
     # 3. Render FCPXML (must use ORIGINAL-timeline subtitles so
     # the per-cut pairing in fcpxml_builder sees matching

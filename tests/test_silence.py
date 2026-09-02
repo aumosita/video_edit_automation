@@ -208,12 +208,48 @@ class TestSnapToVoice:
                   VoiceRange(source_in=6.0, source_out=8.0)]
         # 0.1 s before a voice edge → snap to it.
         assert snap_to_voice(1.9, voices) == 2.0
-        # Outside the snap window (0.4 s default) → keep.
-        assert snap_to_voice(1.5, voices) == 1.5
+        # 0.5 s before a voice edge is within the new 0.7 s snap
+        # window (the widen from 0.4 was intentional, to absorb
+        # faster-whisper's early-onset bias).
+        assert snap_to_voice(1.5, voices) == 2.0
+        # 1.5 s away is outside any reasonable snap window.
+        assert snap_to_voice(0.5, voices) == 0.5
 
     def test_no_voice_ranges_keeps_timestamp(self):
         from veauto.silence import snap_to_voice
         assert snap_to_voice(3.0, []) == 3.0
+
+
+class TestShiftSubtitleTimestamps:
+    """``shift_subtitle_timestamps`` is the bulk helper the pipeline
+    uses to apply :func:`snap_to_voice` across an entire subtitle
+    list. It returns the number of subtitles that actually moved.
+    """
+
+    def test_returns_count_of_moved_subtitles(self):
+        from veauto.models import SubtitleSegment, VoiceRange
+        from veauto.silence import shift_subtitle_timestamps
+        voices = [VoiceRange(source_in=2.0, source_out=4.0)]
+        subs = [
+            # Edge 2.0 is 0.3 s away -> snaps to 2.0.
+            SubtitleSegment(start=1.7, end=1.9, text="snaps-left"),
+            # Inside the voice range -> untouched.
+            SubtitleSegment(start=2.5, end=3.5, text="in-voice"),
+            # Edge 4.0 is 0.5 s away -> snaps to 4.0.
+            SubtitleSegment(start=4.3, end=4.5, text="snaps-right"),
+            # 1.5 s away from 2.0 -> outside the 0.7 s window, unchanged.
+            SubtitleSegment(start=0.5, end=0.6, text="too-far"),
+        ]
+        original_starts = [s.start for s in subs]
+        n = shift_subtitle_timestamps(subs, voices)
+        # 2 of the 4 subtitles move.
+        assert n == 2
+        # Indices 0 and 2 should have snapped to the nearest edge.
+        assert subs[0].start == pytest.approx(2.0)
+        assert subs[1].start == pytest.approx(2.5)  # untouched
+        assert subs[2].end == pytest.approx(4.0)
+        # Index 3 is too far from any edge.
+        assert subs[3].start == pytest.approx(original_starts[3])
 
 
 class _DummyPath:

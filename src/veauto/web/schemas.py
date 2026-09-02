@@ -45,6 +45,14 @@ class JobOptions(BaseModel):
         "auto", "int8", "int8_float16", "float16", "float32"
     ] = "auto"
     beam_size: int = Field(default=5, ge=1, le=20)
+    subtitle_offset: float = Field(
+        default=0.0, ge=-2.0, le=2.0,
+        description=(
+            "Manual subtitle timing offset in seconds. "
+            "Positive = captions appear later, negative = earlier. "
+            "Applied after STT and VAD snap."
+        ),
+    )
 
     # Style
     style_position: Literal["top", "center", "bottom"] = "bottom"
@@ -71,6 +79,7 @@ class JobOptions(BaseModel):
                 device=self.device,
                 compute_type=self.compute_type,
                 beam_size=self.beam_size,
+                offset=self.subtitle_offset,
                 style=SubtitleStyle(
                     position=self.style_position,
                     font=self.style_font,

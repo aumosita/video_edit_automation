@@ -442,6 +442,72 @@ class TestRunPipelineSubtitles:
         )
         assert result.subtitles is not None  # happy-path sanity
 
+    def test_b4_manual_subtitle_offset(self, monkeypatch, tmp_path):
+        """Regression: ``config.subtitle.offset`` must shift every
+        subtitle's start/end by exactly that many seconds, applied
+        *after* the VAD snap, and never below 0.
+        """
+        cfg = PipelineConfig()
+        cfg.silence.enabled = False
+        cfg.subtitle.enabled = True
+        cfg.subtitle.offset = 0.3
+        cfg.keep_temp = True
+
+        wav = tmp_path / "fake.wav"
+        wav.write_text("x")
+        _patch_pipeline_io(
+            monkeypatch, tmp_path,
+            silences=[],
+            cuts=[CutSegment(source_in=0, source_out=10)],
+            audio_wav=wav,
+        )
+
+        seen: dict = {}
+        def _capture(media, cuts, **kw):
+            seen["subs"] = kw.get("subtitles")
+            return "<fcpxml/>"
+        monkeypatch.setattr("veauto.pipeline.build_fcpxml", _capture)
+
+        run_pipeline(tmp_path / "in.mp4", cfg)
+        # 3 words → 3 subtitle lines, each shifted by +0.3 s.
+        for s in seen["subs"]:
+            assert s.start >= 0.3, f"start < offset: {s.start}"
+            # Each line is at least 0.01 s long (sanity).
+            assert s.end - s.start >= 0.01
+
+    def test_b4_negative_offset_clamps_to_zero(self, monkeypatch, tmp_path):
+        """A negative offset must never let a subtitle start
+        before t=0. The pipeline clamps to 0 to avoid negative
+        timestamps in the FCPXML.
+        """
+        cfg = PipelineConfig()
+        cfg.silence.enabled = False
+        cfg.subtitle.enabled = True
+        cfg.subtitle.offset = -0.5
+        cfg.keep_temp = True
+
+        wav = tmp_path / "fake.wav"
+        wav.write_text("x")
+        _patch_pipeline_io(
+            monkeypatch, tmp_path,
+            silences=[],
+            cuts=[CutSegment(source_in=0, source_out=10)],
+            audio_wav=wav,
+        )
+
+        seen: dict = {}
+        def _capture(media, cuts, **kw):
+            seen["subs"] = kw.get("subtitles")
+            return "<fcpxml/>"
+        monkeypatch.setattr("veauto.pipeline.build_fcpxml", _capture)
+
+        run_pipeline(tmp_path / "in.mp4", cfg)
+        # The first subtitle starts at 0.5 s; after -0.5 offset
+        # it must be clamped to 0 (not -0.5).
+        assert seen["subs"][0].start == pytest.approx(0.0)
+        # And the end must be at least 0.01 s past start.
+        assert seen["subs"][0].end - seen["subs"][0].start >= 0.01
+
     def test_subtitle_in_silence_is_dropped(self, monkeypatch, tmp_path):
         cfg = PipelineConfig()
         cfg.silence.enabled = True

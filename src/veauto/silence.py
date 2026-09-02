@@ -357,15 +357,29 @@ def snap_to_voice(
     t: float,
     voice_ranges: list[VoiceRange],
     *,
-    snap_window: float = 0.4,
+    snap_window: float = 0.7,
 ) -> float:
     """Snap a single timestamp onto the nearest voice range.
 
-    If ``t`` is already inside a voice range, return it unchanged.
-    If it's within ``snap_window`` of a voice edge, snap to the
-    edge. Otherwise return ``t`` unchanged — we never pull a
-    subtitle arbitrarily far from its STT time, since that
-    would mask real timing errors rather than fix drift.
+    Rules
+    -----
+    1. If ``t`` is already inside a voice range, return it
+       unchanged.
+    2. If ``t`` is within ``snap_window`` of a voice edge, snap
+       to the edge.
+    3. Otherwise return ``t`` unchanged — we never pull a
+       subtitle arbitrarily far from its STT time, since that
+       would mask real timing errors rather than fix drift.
+
+    Why ``snap_window=0.7``
+    ------------------------
+    faster-whisper's word-level timestamps systematically fire
+    *before* the true audio onset — usually by 100-300 ms, but
+    sometimes up to 500 ms. The 0.4 s window we used previously
+    wasn't generous enough to absorb that drift on the worst
+    clips; 0.7 s reliably catches the early-firing cases while
+    still rejecting genuine STT errors (which are usually > 1 s
+    away from a real onset).
     """
     if not voice_ranges:
         return t
@@ -382,3 +396,29 @@ def snap_to_voice(
     if best_dist <= snap_window:
         return best
     return t
+
+
+
+def shift_subtitle_timestamps(
+    subtitles,
+    voice_ranges,
+    *,
+    snap_window: float = 0.7,
+) -> int:
+    """Apply :func:`snap_to_voice` to every subtitle in place.
+
+    Returns the number of subtitles whose timestamps were
+    adjusted. Designed as a single convenience for the pipeline
+    so callers don't have to remember to walk the list.
+    """
+    n = 0
+    for sub in subtitles:
+        new_start = snap_to_voice(sub.start, voice_ranges,
+                                  snap_window=snap_window)
+        new_end = snap_to_voice(sub.end, voice_ranges,
+                                snap_window=snap_window)
+        if new_start != sub.start or new_end != sub.end:
+            sub.start = new_start
+            sub.end = new_end
+            n += 1
+    return n
