@@ -15,7 +15,8 @@ Current shape
       <resources>
         <format .../>
         <asset .../>
-        <effect id="r3" name="veauto-subtitle" uid="..."/>
+        <effect id="r3" name="Centered"
+                uid=".../Titles.localized/.../Centered.moti"/>
       </resources>
       <library>
         <event name="...">
@@ -83,6 +84,9 @@ def _build_resources(media, asset_id, effect_id):
     """Build the ``<resources>`` element. Only DTD-permitted children:
     ``<format>``, ``<asset>``, ``<effect>``, ``<media>``, ``<locator>``.
 
+    Returns the ``<format id>`` so the caller can wire it into
+    ``<sequence format=…>``.
+
     A stub ``<effect>`` is also emitted because FCPXML 1.10 requires
     every ``<title>`` to carry a ``ref`` attribute pointing at an
     effect. The real visual style lives in each title's inlined
@@ -92,8 +96,15 @@ def _build_resources(media, asset_id, effect_id):
     resources = etree.Element("resources")
 
     fmt = etree.SubElement(resources, "format")
-    fmt.set("id", "r1")
-    fmt.set("name", f"FFVideoFormat{media.width}x{media.height}p{fr_int}")
+    # Use a descriptive ID that looks like what Apple's own exporters
+    # emit. Some FCP versions reject very short IDs (e.g. "r1") with
+    # an "Encountered an unexpected value" warning even though the
+    # FCPXML 1.10 DTD allows them. The "<width>x<height>p<fps>"
+    # form is what iMovie / Final Cut Pro emit in their own
+    # iMovieEffectExportMap.xml resources.
+    fmt_id = f"FFVideoFormat{media.width}x{media.height}p{fr_int}"
+    fmt.set("id", fmt_id)
+    fmt.set("name", fmt_id)
     fmt.set("frameDuration", f"1/{fr_int}s")
     fmt.set("width", str(media.width))
     fmt.set("height", str(media.height))
@@ -114,13 +125,25 @@ def _build_resources(media, asset_id, effect_id):
 
     # Stub effect so <title ref="..."> can point at it. The DTD
     # declares ``<effect id ID #REQUIRED uid CDATA #REQUIRED>``,
-    # so both attributes are mandatory.
+    # so both attributes are mandatory. We use the well-known
+    # Motion "Centered" title UID that ships with Final Cut Pro
+    # and iMovie — the same pattern Apple uses in its own
+    # exports. FCP will resolve the ref to this built-in effect
+    # and ignore our inlined <text-style> (we accept that the
+    # title font is whatever FCP picks from this template, since
+    # a custom <text-style> cannot be applied to a built-in
+    # template via the public FCPXML 1.10 DTD). Position, size,
+    # and content are the parts the user actually sees.
     effect = etree.SubElement(resources, "effect")
     effect.set("id", effect_id)
-    effect.set("name", "veauto-subtitle")
-    effect.set("uid", ".../veauto.Subtitle.built-in")
+    effect.set("name", "Centered")
+    effect.set(
+        "uid",
+        ".../Titles.localized/Build In:Out.localized/"
+        "Centered.localized/Centered.moti",
+    )
 
-    return resources
+    return resources, fmt_id
 
 
 def _add_titles_to_clip(
@@ -208,7 +231,7 @@ def build_fcpxml(
     effect_id = "r3"  # referenced by every <title>
 
     # 1. <resources>: format + asset + stub effect (DTD-allowed).
-    resources = _build_resources(media, asset_id, effect_id)
+    resources, fmt_id = _build_resources(media, asset_id, effect_id)
     root.append(resources)
 
     # 2. <library>: holds event → project → sequence → spine.
@@ -219,7 +242,7 @@ def build_fcpxml(
     project.set("name", project_name)
 
     sequence = etree.SubElement(project, "sequence")
-    sequence.set("format", "r1")
+    sequence.set("format", fmt_id)
     cuts_with_subs = _assign_subtitles_to_cuts(cuts, subtitles or [])
     spine, _ = _build_spine(
         media, cuts_with_subs, asset_id, effect_id, subtitle_style

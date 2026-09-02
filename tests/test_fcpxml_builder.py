@@ -335,3 +335,50 @@ class TestFcpTitleRef:
         )
         # The DTD also requires ``uid`` on every <effect>.
         assert effect.get("uid") is not None
+
+
+class TestFcpFormatId:
+    """The ``<format id>`` must be a meaningful, Apple-style identifier
+    (e.g. ``FFVideoFormat1920x1080p30``) rather than the short
+    ``r1`` we used to emit, because some FCP versions reject very
+    short IDs with "Encountered an unexpected value" during the
+    IDREF check.
+    """
+
+    def test_format_id_uses_ffvideoformat_pattern(self):
+        media = _make_media()
+        xml = build_fcpxml(media, [])
+        root = ET.fromstring(xml)
+        fmt = root.find("resources/format")
+        assert fmt is not None
+        fmt_id = fmt.get("id")
+        assert fmt_id is not None
+        assert fmt_id == fmt.get("name")
+        assert fmt_id.startswith("FFVideoFormat")
+        assert str(media.width) in fmt_id
+        assert str(media.height) in fmt_id
+        # The <sequence> must reference that same id.
+        sequence = root.find("library/event/project/sequence")
+        assert sequence is not None
+        assert sequence.get("format") == fmt_id
+
+    def test_effect_uid_uses_apple_pattern(self):
+        """The effect must use a ``…/Titles.localized/…/…moti``
+        uid so Final Cut Pro recognises it as a built-in title.
+        Earlier we emitted ``.../veauto.Subtitle.built-in`` which FCP
+        rejected as "item could not be read".
+        """
+        media = _make_media()
+        cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+        subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
+        xml = build_fcpxml(media, cuts, subtitles=subs,
+                           subtitle_style=SubtitleStyle())
+        root = ET.fromstring(xml)
+        effect = root.find('resources/effect[@id="r3"]')
+        assert effect is not None
+        uid = effect.get("uid", "")
+        assert uid.startswith(".../Titles.localized/"), (
+            f"effect uid should follow Apple's .../Titles.localized/... pattern; "
+            f"got {uid!r}"
+        )
+        assert uid.endswith(".moti")
