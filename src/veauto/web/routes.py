@@ -150,6 +150,11 @@ async def download_artefact(job_id: str, name: str) -> FileResponse:
         media_type = "application/json"
     elif name.endswith(".md"):
         media_type = "text/markdown"
+    elif name.endswith(".srt"):
+        # ``application/x-subrip`` is the de-facto MIME for SubRip
+        # subtitles; some browsers (Safari) treat plain ``text/plain``
+        # as safe, others prefer the explicit content type.
+        media_type = "application/x-subrip; charset=utf-8"
     return FileResponse(target, media_type=media_type, filename=name)
 
 

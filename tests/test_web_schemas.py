@@ -67,17 +67,20 @@ class TestJobRecordDownloadUrls:
         assert rec2.fcpxml_url is None
         assert rec2.report_md_url is None
         assert rec2.report_json_url is None
+        assert rec2.srt_url is None
 
     def test_urls_populated_from_names(self):
         rec = self._make(
             fcpxml_name="output.fcpxml",
             report_md_name="report.md",
             report_json_name="report.json",
+            srt_name="output.srt",
         )
         rec2 = rec.with_download_urls()
         assert rec2.fcpxml_url == "/api/jobs/abc123/download/output.fcpxml"
         assert rec2.report_md_url == "/api/jobs/abc123/download/report.md"
         assert rec2.report_json_url == "/api/jobs/abc123/download/report.json"
+        assert rec2.srt_url == "/api/jobs/abc123/download/output.srt"
 
     def test_does_not_mutate_original(self):
         rec = self._make(fcpxml_name="output.fcpxml")

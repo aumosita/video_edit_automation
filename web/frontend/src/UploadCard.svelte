@@ -98,7 +98,7 @@
       </p>
     </div>
 
-    <details>
+    <details open>
       <summary>Options</summary>
       <div class="grid">
         <label>Model

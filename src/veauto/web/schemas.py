@@ -127,6 +127,7 @@ class JobRecord(BaseModel):
     fcpxml_name: str | None = None
     report_md_name: str | None = None
     report_json_name: str | None = None
+    srt_name: str | None = None
     # Statistics filled in at the end
     num_silences: int | None = None
     num_cuts: int | None = None
@@ -137,6 +138,7 @@ class JobRecord(BaseModel):
     fcpxml_url: str | None = None
     report_md_url: str | None = None
     report_json_url: str | None = None
+    srt_url: str | None = None
 
     def with_download_urls(self) -> JobRecord:
         """Return a shallow copy whose ``*_url`` fields point at this
@@ -154,6 +156,7 @@ class JobRecord(BaseModel):
                 "fcpxml_url": base + self.fcpxml_name if self.fcpxml_name else None,
                 "report_md_url": base + self.report_md_name if self.report_md_name else None,
                 "report_json_url": base + self.report_json_name if self.report_json_name else None,
+                "srt_url": base + self.srt_name if self.srt_name else None,
             }
         )
 

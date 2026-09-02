@@ -69,6 +69,9 @@ def client(app_root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         (job.output_dir / "report.json").write_text(
             '{"ok": true}', encoding="utf-8"
         )
+        (job.output_dir / "out.srt").write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\ntest\n", encoding="utf-8"
+        )
         # Mutate the record's stats in place (the same way the real
         # _run_job does), then set the terminal status. The signature
         # of _set_status does not accept ``result``/``fcpxml_path``;
@@ -83,6 +86,7 @@ def client(app_root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             job.record.fcpxml_name = "out.fcpxml"
             job.record.report_md_name = "report.md"
             job.record.report_json_name = "report.json"
+            job.record.srt_name = "out.srt"
         mgr._set_status(  # type: ignore[attr-defined]
             job,
             "completed",
@@ -139,6 +143,45 @@ class TestJobSubmission:
                 break
             time.sleep(0.05)
         assert r.json()["status"] == "completed"
+        # All four artefacts must be exposed via download URLs once
+        # the job has finished.
+        assert r.json()["fcpxml_url"] == (
+            f"/api/jobs/{body['id']}/download/out.fcpxml"
+        )
+        assert r.json()["report_md_url"] == (
+            f"/api/jobs/{body['id']}/download/report.md"
+        )
+        assert r.json()["report_json_url"] == (
+            f"/api/jobs/{body['id']}/download/report.json"
+        )
+        assert r.json()["srt_url"] == (
+            f"/api/jobs/{body['id']}/download/out.srt"
+        )
+
+    def test_download_srt_returns_text(
+        self, client: TestClient, app_root: Path
+    ):
+        """The SRT artefact is downloadable through the generic
+        /download/{name} endpoint and comes back as text with the
+        correct MIME type.
+        """
+        r = client.post(
+            "/api/jobs",
+            params={"options": '{"model": "tiny"}'},
+            files={"file": ("talk.mp4", io.BytesIO(b"\x00" * 256), "video/mp4")},
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            r = client.get(f"/api/jobs/{body['id']}")
+            if r.json()["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+        r = client.get(f"/api/jobs/{body['id']}/download/out.srt")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/x-subrip")
+        assert r.text.startswith("1\n00:00:00,000 --> 00:00:01,000\n")
 
     def test_empty_file_rejected(self, client: TestClient):
         r = client.post(

@@ -191,6 +191,9 @@
                 {#if job.report_json_url}
                   <a class="link" href={job.report_json_url} target="_blank" rel="noopener">.json</a>
                 {/if}
+                {#if job.srt_url}
+                  <a class="link" href={job.srt_url} target="_blank" rel="noopener">.srt</a>
+                {/if}
                 <button class="link danger" onclick={() => onDelete(job.id)}>Delete</button>
               </td>
             </tr>

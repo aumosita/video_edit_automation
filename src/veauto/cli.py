@@ -203,7 +203,17 @@ def subtitles(
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(xml, encoding='utf-8')
+        # Side-by-side SRT for users who want plain-text subtitles.
+        from .srt import write_srt
+        # ``output`` may be ``out.fcpxml`` (most common) — derive
+        # ``out.srt`` so the two artefacts sit side by side.
+        if output.suffix:
+            srt_path = output.with_name(output.stem + ".srt")
+        else:
+            srt_path = output.with_suffix(".srt")
+        write_srt(segments, srt_path)
         console.print(f'[bold green]Wrote:[/bold green] {output} ({len(xml)} bytes)')
+        console.print(f'[bold green]Wrote:[/bold green] {srt_path}')
     finally:
         if not keep_audio and wav_path.exists():
             wav_path.unlink()
@@ -366,6 +376,18 @@ def run(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(result.fcpxml, encoding='utf-8')
     console.print(f'[bold green]Wrote:[/bold green] {output} ({len(result.fcpxml)} bytes)')
+
+    # Side-by-side SRT — written next to the FCPXML so users
+    # who don't want to deal with the XML can import the SRT
+    # into any NLE, player, or web player.
+    if result.subtitles:
+        from .srt import write_srt
+        if output.suffix:
+            srt_path = output.with_name(output.stem + ".srt")
+        else:
+            srt_path = output.with_suffix(".srt")
+        write_srt(result.subtitles, srt_path)
+        console.print(f'[bold green]Wrote:[/bold green] {srt_path}')
 
     # 5. Report (P4)
     if report is not None or cfg.output.write_report:

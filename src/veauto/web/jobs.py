@@ -323,6 +323,14 @@ class JobManager:
 
             fcpxml_name = "output.fcpxml"
             (job.output_dir / fcpxml_name).write_text(result.fcpxml, encoding="utf-8")
+
+            # Side-by-side SubRip (.srt) subtitles. Written next to
+            # the FCPXML so users who don't want to deal with the XML
+            # can import the SRT directly into any NLE or player.
+            srt_name = "output.srt"
+            from ..srt import write_srt
+            write_srt(result.subtitles, job.output_dir / srt_name)
+
             self._set_status(job, "running", stage="writing", progress=0.97,
                              message="Writing report…")
             report_data = build_report_data(result)
@@ -344,6 +352,7 @@ class JobManager:
                 record.fcpxml_name = fcpxml_name
                 record.report_md_name = "report.md"
                 record.report_json_name = "report.json"
+                record.srt_name = srt_name
 
             self._set_status(
                 job, "completed", stage="done", progress=1.0,
