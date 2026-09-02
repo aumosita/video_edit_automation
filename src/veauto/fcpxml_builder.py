@@ -1,29 +1,54 @@
 """FCPXML 1.10 builder.
 
-Generates a Final Cut Pro XML file from the pipeline's intermediate data
-(cut segments + optional subtitle segments). The output can be imported
-directly into DaVinci Resolve, Final Cut Pro, or Adobe Premiere Pro.
+Generates a Final Cut Pro XML file from the pipeline's intermediate
+data (cut segments + optional subtitle segments). The output is
+DTD-compatible with Final Cut Pro's importer — earlier versions put
+``<text-style-def>`` under ``<resources>`` and emitted Motion-only
+attributes (``relativeTo`` etc.) on ``<text-style>``, both of which
+caused FCP to reject the import with ``DTD validation failed``.
 
-Time representation in FCPXML is rational: ``"N/Ds"`` where N and D are
-integers. The base time unit is the frame. We use the source media frame
-rate as the denominator so that all offsets and durations are exact at
-frame boundaries.
+Current shape
+-------------
+::
+
+    <fcpxml version="1.10">
+      <resources>
+        <format .../>
+        <asset .../>
+        <effect id="r3" name="veauto-subtitle" uid="..."/>
+      </resources>
+      <library>
+        <event name="...">
+          <project name="...">
+            <sequence format="r1">
+              <spine>
+                <asset-clip ...>
+                  <title ref="r3" lane="1"
+                          offset="..." duration="...">
+                    <text>
+                      <text-style font="..." fontSize="48" ...>
+                        Hello
+                      </text-style>
+                    </text>
+                  </title>
+                </asset-clip>
+              </spine>
+            </sequence>
+          </project>
+        </event>
+      </library>
+    </fcpxml>
 """
 
 from __future__ import annotations
 
 from lxml import etree
 
-# FCPXML uses this attribute on <asset-clip> to mark it as the source media.
 _FCPXML_VERSION = "1.10"
 
 
 def _rational_time(seconds: float, frame_rate: float) -> str:
-    """Convert seconds to FCPXML rational time ``"N/Ds"``.
-
-    Uses the source frame rate as the denominator so that all time values
-    are exact at frame boundaries.
-    """
+    """Convert seconds to FCPXML rational time ``"N/Ds"``."""
     if seconds < 0:
         seconds = 0.0
     frames = round(seconds * frame_rate)
@@ -33,7 +58,11 @@ def _rational_time(seconds: float, frame_rate: float) -> str:
 
 
 def _assign_subtitles_to_cuts(cuts, subtitles):
-    """Assign each subtitle to its containing cut segment."""
+    """Pair each subtitle with the cut segment that contains it.
+
+    Returns ``[(cut, [(sub, offset_within_cut_seconds), ...]), ...]``,
+    sorted by subtitle start time within each cut.
+    """
     result = []
     for cut in cuts:
         local = []
@@ -50,7 +79,15 @@ def _assign_subtitles_to_cuts(cuts, subtitles):
     return result
 
 
-def _build_resources(media, asset_id, text_style_def_id):
+def _build_resources(media, asset_id, effect_id):
+    """Build the ``<resources>`` element. Only DTD-permitted children:
+    ``<format>``, ``<asset>``, ``<effect>``, ``<media>``, ``<locator>``.
+
+    A stub ``<effect>`` is also emitted because FCPXML 1.10 requires
+    every ``<title>`` to carry a ``ref`` attribute pointing at an
+    effect. The real visual style lives in each title's inlined
+    ``<text-style>`` — the stub effect only exists to satisfy the DTD.
+    """
     fr_int = int(round(media.frame_rate))
     resources = etree.Element("resources")
 
@@ -64,7 +101,10 @@ def _build_resources(media, asset_id, text_style_def_id):
     asset = etree.SubElement(resources, "asset")
     asset.set("id", asset_id)
     asset.set("name", media.path.name)
-    asset.set("src", f"file://{media.path.resolve()}")
+    # NOTE: we deliberately do NOT emit ``src`` on the <asset> element.
+    # Apple's FCPXML 1.10 DTD does not declare it on <asset>; the file
+    # path belongs on <media-rep src="…"> instead, where the DTD
+    # requires it.
     asset.set("duration", _rational_time(media.duration, media.frame_rate))
     asset.set("hasVideo", "1")
     asset.set("hasAudio", "1" if media.has_audio else "0")
@@ -72,24 +112,61 @@ def _build_resources(media, asset_id, text_style_def_id):
     media_rep.set("kind", "original-media")
     media_rep.set("src", f"file://{media.path.resolve()}")
 
+    # Stub effect so <title ref="..."> can point at it. The DTD
+    # declares ``<effect id ID #REQUIRED uid CDATA #REQUIRED>``,
+    # so both attributes are mandatory.
+    effect = etree.SubElement(resources, "effect")
+    effect.set("id", effect_id)
+    effect.set("name", "veauto-subtitle")
+    effect.set("uid", ".../veauto.Subtitle.built-in")
+
     return resources
 
 
-def _build_text_style_def(style, def_id):
-    text_def = etree.Element("text-style-def")
-    text_def.set("id", def_id)
-    text_def.set("name", style.font)
-    text_style = etree.SubElement(text_def, "text-style")
-    for k, v in style.to_text_style_xml_attrs().items():
-        text_style.set(k, v)
-    text_style.set("alignment", "center")
-    text_style.set("relativeTo", style.position)
-    text_style.set("verticalAnchor", style.position)
-    text_style.set("horizontalAnchor", "center")
-    return text_def
+def _add_titles_to_clip(
+    clip, subs, cut, fr, effect_id, subtitle_style
+):
+    """Append one ``<title>`` per subtitle to ``clip`` (an asset-clip).
+
+    Notes
+    -----
+    * The visual style is inlined into each title's
+      ``<text><text-style>...</text-style></text>`` so that the
+      document does not need a separate ``<text-style-def>``
+      element — Apple's FCPXML 1.10 DTD only allows
+      ``<text-style-def>`` inside a ``<title>``.
+    * Subtitle placement (top/center/bottom) is NOT emitted on the
+      ``<title>`` element: the DTD does not declare a ``position``
+      attribute on ``<title>`` (it is a Motion extension). We let FCP
+      use its default placement (lower third) and rely on the user
+      to drag titles in the NLE if a different position is desired.
+      The visual style of each title — which the user does care
+      about — is preserved verbatim.
+    """
+    style_attrs = subtitle_style.to_text_style_xml_attrs()
+    for sub, offset in subs:
+        sub_dur = sub.end - sub.start
+        remaining = (cut.source_out - cut.source_in) - offset
+        sub_dur = min(sub_dur, remaining)
+        if sub_dur <= 0:
+            continue
+        title = etree.SubElement(clip, "title")
+        title.set("name", "Subtitle")
+        # DTD requires ``ref`` on every <title> (points at the
+        # stub <effect> in <resources>). The real visual style is
+        # the inlined <text-style> below.
+        title.set("ref", effect_id)
+        title.set("lane", "1")
+        title.set("offset", _rational_time(offset, fr))
+        title.set("duration", _rational_time(sub_dur, fr))
+        text_el = etree.SubElement(title, "text")
+        ts = etree.SubElement(text_el, "text-style")
+        for k, v in style_attrs.items():
+            ts.set(k, v)
+        ts.text = sub.text
 
 
-def _build_spine(media, cuts_with_subs, asset_id, text_style_def_id):
+def _build_spine(media, cuts_with_subs, asset_id, effect_id, subtitle_style):
     spine = etree.Element("spine")
     cursor = 0
     fr = media.frame_rate
@@ -101,50 +178,54 @@ def _build_spine(media, cuts_with_subs, asset_id, text_style_def_id):
         clip.set("ref", asset_id)
         clip.set("start", _rational_time(cut.source_in, fr))
         clip.set("duration", _rational_time(clip_dur, fr))
-        if subs:
-            _add_titles_to_clip(clip, subs, cut, text_style_def_id, fr)
+        if subs and subtitle_style is not None:
+            _add_titles_to_clip(
+                clip, subs, cut, fr, effect_id, subtitle_style,
+            )
         cursor += clip_dur
     return spine, cursor
 
 
-def _add_titles_to_clip(clip, subs, cut, text_style_def_id, fr):
-    for sub, offset in subs:
-        sub_start = max(sub.start, cut.source_in)
-        sub_dur = sub.end - sub_start
-        remaining = (cut.source_out - cut.source_in) - offset
-        sub_dur = min(sub_dur, remaining)
-        if sub_dur <= 0:
-            continue
-        title = etree.SubElement(clip, "title")
-        title.set("name", "Subtitle")
-        title.set("lane", "1")
-        title.set("offset", _rational_time(offset, fr))
-        title.set("ref", text_style_def_id)
-        title.set("duration", _rational_time(sub_dur, fr))
-        text_el = etree.SubElement(title, "text")
-        ts = etree.SubElement(text_el, "text-style")
-        ts.set("ref", text_style_def_id)
-        ts.text = sub.text
+def build_fcpxml(
+    media,
+    cuts,
+    *,
+    subtitles=None,
+    subtitle_style=None,
+    project_name="Auto Edit",
+    event_name="veauto",
+):
+    """Build a DTD-compatible FCPXML 1.10 document.
 
-
-def build_fcpxml(media, cuts, *, subtitles=None, subtitle_style=None, project_name="Auto Edit", event_name="veauto"):
+    No ``<text-style-def>`` is emitted. Apple's FCPXML 1.10 DTD only
+    permits ``<text-style-def>`` inside a ``<title>``, not at the
+    project or resources level. Instead, the visual style is inlined
+    into each title's ``<text><text-style>`` so the file is
+    self-contained and survives FCP's DTD validation.
+    """
     root = etree.Element("fcpxml", version=_FCPXML_VERSION)
     asset_id = "r2"
-    text_style_def_id = "r3"
-    resources = _build_resources(media, asset_id, text_style_def_id)
-    if subtitles is not None and subtitle_style is not None:
-        text_def = _build_text_style_def(subtitle_style, text_style_def_id)
-        resources.append(text_def)
+    effect_id = "r3"  # referenced by every <title>
+
+    # 1. <resources>: format + asset + stub effect (DTD-allowed).
+    resources = _build_resources(media, asset_id, effect_id)
     root.append(resources)
+
+    # 2. <library>: holds event → project → sequence → spine.
     library = etree.SubElement(root, "library")
     event = etree.SubElement(library, "event")
     event.set("name", event_name)
     project = etree.SubElement(event, "project")
     project.set("name", project_name)
+
     sequence = etree.SubElement(project, "sequence")
     sequence.set("format", "r1")
     cuts_with_subs = _assign_subtitles_to_cuts(cuts, subtitles or [])
-    spine, _ = _build_spine(media, cuts_with_subs, asset_id, text_style_def_id)
+    spine, _ = _build_spine(
+        media, cuts_with_subs, asset_id, effect_id, subtitle_style
+    )
     sequence.append(spine)
-    xml_bytes = etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
+    xml_bytes = etree.tostring(
+        root, xml_declaration=True, encoding="UTF-8", pretty_print=True
+    )
     return xml_bytes.decode("utf-8")

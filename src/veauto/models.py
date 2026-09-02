@@ -124,7 +124,13 @@ class SubtitleStyle(BaseModel):
     max_duration: float = Field(default=6.0, ge=0.5, description="Maximum display seconds")
 
     def to_text_style_xml_attrs(self) -> dict[str, str]:
-        """Return attributes for the <text-style> element in FCPXML 1.10."""
+        """Return attributes for the ``<text-style>`` element.
+
+        Only attributes defined in the FCPXML 1.10 DTD are emitted.
+        The legacy ``relativeTo`` / ``verticalAnchor`` / ``horizontalAnchor``
+        (Motion-only) attributes are NOT included because they trip
+        Final Cut Pro's DTD validation on import.
+        """
         attrs: dict[str, str] = {
             "font": self.font,
             "fontSize": str(self.font_size),
@@ -134,6 +140,7 @@ class SubtitleStyle(BaseModel):
             "shadowColor": self.shadow_color,
             "shadowOffset": f"{self.shadow_offset[0]} {self.shadow_offset[1]}",
             "shadowBlurRadius": str(self.shadow_blur),
+            "alignment": "center",
         }
         if self.bold:
             attrs["bold"] = "1"

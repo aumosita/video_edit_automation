@@ -169,7 +169,15 @@ def test_subtitles_passes_style_to_builder(tmp_path, monkeypatch) -> None:
 
     content = out.read_text(encoding="utf-8")
     assert 'fontSize="64"' in content
-    assert 'relativeTo="top"' in content
+    # Subtitle style is now inlined into every <title>'s
+    # <text-style> so the file passes Apple's FCPXML 1.10
+    # DTD validation. The Motion-only `relativeTo` attribute
+    # is gone (FCP rejects it), and the `position` attribute
+    # on <title> is not in the DTD either.
+    assert '<title' in content
+    assert '<text-style' in content
+    assert 'relativeTo' not in content
+    assert 'position="' not in content
 
 
 def test_subtitles_handles_no_words(tmp_path, monkeypatch) -> None:
