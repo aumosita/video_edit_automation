@@ -30,11 +30,21 @@ def _make_test_video(path, duration=2.0):
 
 
 def test_cli_help():
+    """``--help`` renders, and every subcommand is registered.
+
+    The subcommand names are checked against the Click group rather
+    than the rendered help text: rich wraps/truncates the help table
+    to the detected terminal width, which differs between local
+    machines and CI runners.
+    """
+    from typer.main import get_command
+
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "veauto" in result.stdout
-    assert "info" in result.stdout
-    assert "trim" in result.stdout
+
+    commands = set(get_command(app).commands)
+    for name in ("info", "trim", "subtitles", "run"):
+        assert name in commands, f"Missing subcommand {name!r}"
 
 
 @FFMPEG_SKIP

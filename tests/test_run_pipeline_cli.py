@@ -119,6 +119,7 @@ class TestRunWithConfigFile:
         _stub_transcriber(monkeypatch)
 
         out = tmp_path / "out.fcpxml"
+        effective = tmp_path / "effective.yaml"
         runner = CliRunner()
         result = runner.invoke(
             app,
@@ -128,11 +129,18 @@ class TestRunWithConfigFile:
                 "-o", str(out),
                 "--config", str(cfg_file),
                 "--noise-db", "-40.0",  # override YAML value
+                # Dump the merged config so the assertion inspects real
+                # values instead of rich-rendered console text (which
+                # wraps differently depending on terminal width).
+                "--write-config", str(effective),
             ],
         )
         assert result.exit_code == 0, result.stdout
-        # noise_db -40 is printed via "Silences: ... (<= -40.0dB)"
-        assert "-40.0dB" in result.stdout
+        merged = yaml.safe_load(effective.read_text(encoding="utf-8"))
+        # The CLI flag must win over the YAML file's -20.0. (The CLI
+        # applies *all* of its options over the config file, so the
+        # file acts purely as a defaults layer.)
+        assert merged["silence"]["noise_db"] == -40.0
 
     def test_invalid_config_exits_with_code_2(
         self, monkeypatch, tmp_path: Path

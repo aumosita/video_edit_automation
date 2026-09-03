@@ -66,10 +66,31 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _declared_option_flags(command_name: str) -> set[str]:
+    """Return every CLI flag declared on ``veauto <command_name>``.
+
+    We introspect the Click command that Typer builds instead of
+    scraping ``--help`` text. Rich renders the help table to the
+    detected terminal width and *truncates* long flags with an
+    ellipsis (e.g. ``--compute-type`` shows as ``--comput…``), so
+    substring assertions on the rendered output pass locally and
+    fail on CI runners with a narrower/different terminal. The
+    parameter list is the ground truth and is width-independent.
+    """
+    from typer.main import get_command
+
+    group = get_command(app)
+    command = group.commands[command_name]
+    flags: set[str] = set()
+    for param in command.params:
+        flags.update(param.opts)
+        flags.update(getattr(param, "secondary_opts", None) or [])
+    return flags
+
+
 def test_subtitles_help_lists_all_options() -> None:
-    result = runner.invoke(app, ["subtitles", "--help"])
-    assert result.exit_code == 0
-    out = result.stdout
+    """Every documented option must exist on the ``subtitles`` command."""
+    flags = _declared_option_flags("subtitles")
     for flag in (
         "--output", "--model", "--language", "--device", "--compute-type",
         "--beam-size", "--style-position", "--style-font", "--style-font-size",
@@ -77,16 +98,27 @@ def test_subtitles_help_lists_all_options() -> None:
         "--style-max-duration", "--project-name", "--event-name",
         "--keep-audio", "--audio-dir",
     ):
-        assert flag in out, f"Missing option {flag!r}"
+        assert flag in flags, f"Missing option {flag!r}"
+    # --help itself must still render without crashing.
+    result = runner.invoke(app, ["subtitles", "--help"])
+    assert result.exit_code == 0
 
 
 def test_subtitles_requires_output(tmp_path) -> None:
+    """Omitting ``--output`` must fail before any media work happens."""
+    from typer.main import get_command
+
+    # Ground truth: the parameter is declared required.
+    command = get_command(app).commands["subtitles"]
+    output_param = next(p for p in command.params if p.name == "output")
+    assert output_param.required is True
+
     src = tmp_path / "in.mp4"
     src.write_text("not a real video, but the cli shouldn't reach extraction")
     result = runner.invoke(app, ["subtitles", str(src)])
+    # Click exits with code 2 for a usage error; the important part is
+    # that it is a *failure* and not a successful run.
     assert result.exit_code != 0
-    combined = (result.stdout + (result.stderr or "")).lower()
-    assert "required" in combined or "--output" in combined
 
 
 # ---------------------------------------------------------------------------

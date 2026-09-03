@@ -60,28 +60,6 @@ jobs:
       - name: Ruff (lint)
         run: uv run --python ${{ matrix.python-version }} ruff check .
 
-      - name: Diagnose veauto install & help (temporary)
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        run: |
-          uv run --python 3.12 python - <<'PY' | tee diag.txt
-          import os, veauto, veauto.cli as c, inspect
-          print('CHDIR', os.getcwd())
-          print('veauto', veauto.__file__)
-          print('cli', c.__file__)
-          import typer, click, rich
-          print('typer', getattr(typer, '__version__', '?'), 'click', getattr(click, '__version__', '?'), 'rich', getattr(rich, '__version__', '?'))
-          print('subtitles sig:', inspect.signature(c.subtitles))
-          print('has output param in cli:', 'output:' in inspect.getsource(c.subtitles))
-          PY
-
-      - name: Upload diag artifact (temporary)
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@v4
-        with:
-          name: veauto-diag
-          path: diag.txt
-          if-no-files-found: warn
-
       - name: Pytest with coverage
         run: |
           uv run --python ${{ matrix.python-version }} \
