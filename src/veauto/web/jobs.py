@@ -549,11 +549,18 @@ class JobManager:
             progress("transcribing", 0.75, f"Transcribed {len(words)} words")
             return words
 
-        def _cuts(total, silences, *, margin):
+        def _cuts(total, silences, *, margin, min_keep_seconds=0.0):
+            # ``build_cut_segments`` gained an optional ``min_keep_seconds``
+            # kwarg in the silence-stage overhaul; the progress hook here
+            # must forward it, otherwise ``pipeline.run_pipeline`` would
+            # raise TypeError when the web worker tries to compile cut
+            # segments. The default of 0 keeps the legacy behaviour for
+            # any caller that doesn't pass the new flag.
             _check()
             _enter("build_cut_segments")
             progress("building_cuts", 0.20, "Building cut segments…")
-            res = orig_cuts(total, silences, margin=margin)
+            res = orig_cuts(total, silences, margin=margin,
+                            min_keep_seconds=min_keep_seconds)
             _enter("post_build_cut_segments")
             return res
 
