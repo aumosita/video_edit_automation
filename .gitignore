@@ -28,6 +28,7 @@ uv.lock
 tmp/
 tests/samples/*.wav
 tests/samples/*.mp4
+tests/samples/*.mov
 tests/output/
 
 # Coverage
