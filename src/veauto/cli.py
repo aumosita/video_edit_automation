@@ -70,7 +70,11 @@ def trim(
     output: Path = typer.Option(..., '-o', '--output', help='Output FCPXML path.'),
     noise_db: float = typer.Option(-30.0, '--noise-db', help='Silence threshold in dB.'),
     min_silence: float = typer.Option(1.5, '--min-silence', help='Min silence length (s).'),
-    margin: float = typer.Option(0.2, '--margin', help='Padding kept on each side of cut (s).'),
+    margin: float = typer.Option(0.3, '--margin', help='Padding kept on each side of cut (s).'),
+    min_keep_seconds: float = typer.Option(
+        0.15, '--min-keep-seconds',
+        help='Drop kept segments shorter than this (s). Removes glitch cuts between two removed silences.',
+    ),
     project_name: str = typer.Option('Auto Edit', '--project-name'),
     event_name: str = typer.Option('veauto', '--event-name'),
 ):
@@ -79,10 +83,15 @@ def trim(
     media = probe_media_info(input_path)
     console.print(f'[bold]Probing:[/bold] {media.path} ({media.duration:.2f}s)')
 
-    sil_cfg = SilenceConfig(noise_db=noise_db, min_silence=min_silence, margin=margin, enabled=True)
+    sil_cfg = SilenceConfig(
+        noise_db=noise_db, min_silence=min_silence, margin=margin,
+        min_keep_seconds=min_keep_seconds, enabled=True,
+    )
     intervals = detect_silence(input_path, sil_cfg)
     console.print(f'[bold]Silences:[/bold] {len(intervals)} (>= {min_silence}s, <= {noise_db}dB)')
-    kept, removed = build_cut_segments(media.duration, intervals, margin=margin)
+    kept, removed = build_cut_segments(
+        media.duration, intervals, margin=margin, min_keep_seconds=min_keep_seconds
+    )
     console.print(f'[bold]Kept:[/bold] {len(kept)} segments, total {sum(c.duration for c in kept):.2f}s')
     console.print(f'[bold]Removed:[/bold] {sum(r.duration for r in removed):.2f}s')
     xml = build_fcpxml(media, kept, project_name=project_name, event_name=event_name)
@@ -117,7 +126,7 @@ def subtitles(
         help='Subtitle position (top|center|bottom).',
     ),
     style_font: str = typer.Option('Apple SD Gothic Neo', '--style-font'),
-    style_font_size: int = typer.Option(48, '--style-font-size', min=8, max=400),
+    style_font_size: int = typer.Option(56, '--style-font-size', min=8, max=400),
     style_max_chars: int = typer.Option(42, '--style-max-chars', min=5, max=200),
     style_max_lines: int = typer.Option(2, '--style-max-lines', min=1, max=4),
     style_min_duration: float = typer.Option(0.8, '--style-min-duration', min=0.1),
@@ -227,7 +236,11 @@ def run(
     # Silence stage
     noise_db: float = typer.Option(-30.0, '--noise-db'),
     min_silence: float = typer.Option(1.5, '--min-silence'),
-    margin: float = typer.Option(0.2, '--margin'),
+    margin: float = typer.Option(0.3, '--margin'),
+    min_keep_seconds: float = typer.Option(
+        0.15, '--min-keep-seconds',
+        help='Drop kept segments shorter than this (removes glitch cuts between two removed silences).',
+    ),
     no_silence: bool = typer.Option(False, '--no-silence', help='Skip the silence-removal stage.'),
     # Subtitle stage
     no_subtitles: bool = typer.Option(False, '--no-subtitles', help='Skip the STT stage.'),
@@ -246,7 +259,7 @@ def run(
     # Subtitle style
     style_position: str = typer.Option('bottom', '--style-position'),
     style_font: str = typer.Option('Apple SD Gothic Neo', '--style-font'),
-    style_font_size: int = typer.Option(48, '--style-font-size', min=8, max=400),
+    style_font_size: int = typer.Option(56, '--style-font-size', min=8, max=400),
     style_max_chars: int = typer.Option(42, '--style-max-chars', min=5, max=200),
     style_max_lines: int = typer.Option(2, '--style-max-lines', min=1, max=4),
     style_min_duration: float = typer.Option(0.8, '--style-min-duration', min=0.1),
@@ -312,6 +325,7 @@ def run(
     cfg.silence.noise_db = noise_db
     cfg.silence.min_silence = min_silence
     cfg.silence.margin = margin
+    cfg.silence.min_keep_seconds = min_keep_seconds
 
     cfg.subtitle.enabled = not no_subtitles
     cfg.subtitle.model = model  # type: ignore[assignment]

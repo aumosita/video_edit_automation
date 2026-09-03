@@ -126,15 +126,15 @@ class SubtitleStyle(BaseModel):
         ),
     )
     font: str = "Apple SD Gothic Neo"
-    font_size: int = Field(default=48, ge=8, le=400)
+    font_size: int = Field(default=56, ge=8, le=400)
     bold: bool = True
     italic: bool = False
     color: str = Field(default="1 1 1 1", description="RGBA in FCPXML 0..1 floats")
     outline_color: str = Field(default="0 0 0 1")
-    outline_width: float = Field(default=2.0, ge=0.0)
-    shadow_color: str = Field(default="0 0 0 0.5")
-    shadow_offset: tuple[float, float] = Field(default=(2.0, -2.0))
-    shadow_blur: float = Field(default=2.0, ge=0.0)
+    outline_width: float = Field(default=3.5, ge=0.0)
+    shadow_color: str = Field(default="0 0 0 0.65")
+    shadow_offset: tuple[float, float] = Field(default=(2.0, 3.0))
+    shadow_blur: float = Field(default=8.0, ge=0.0)
     max_chars_per_line: int = Field(default=42, ge=5, le=200)
     max_lines: int = Field(default=2, ge=1, le=4)
     min_duration: float = Field(default=0.8, ge=0.1, description="Minimum display seconds")
@@ -171,7 +171,16 @@ class SilenceConfig(BaseModel):
 
     noise_db: float = Field(default=-30.0, description="Silence threshold in dB (e.g. -30)")
     min_silence: float = Field(default=1.5, ge=0.1, description="Minimum silence length to cut (s)")
-    margin: float = Field(default=0.2, ge=0.0, description="Padding kept on each side of cut (s)")
+    margin: float = Field(default=0.3, ge=0.0, description="Padding kept on each side of cut (s)")
+    min_keep_seconds: float = Field(
+        default=0.15,
+        ge=0.0,
+        description=(
+            "Kept segments shorter than this are dropped. Between two removed "
+            "silences such tiny clips survive as sub-quarter-second 'glitch' cuts; "
+            "dropping them keeps the edit looking intentional."
+        ),
+    )
     enabled: bool = True
 
 

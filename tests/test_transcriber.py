@@ -151,6 +151,59 @@ def test_words_to_subtitle_segments_merges_short_segments() -> None:
     assert out[0].text == "hi there"
 
 
+def test_words_to_subtitle_segments_never_overlap() -> None:
+    """The min-duration extension must not run past the next line's onset.
+
+    Two adjacent short lines used to both be stretched to ``min_duration``,
+    so the first one overlapped the second and FCP showed both at once.
+    """
+    words = [
+        _w(0.0, 0.2, "hello"),
+        _w(0.3, 0.5, "world"),
+        _w(3.0, 3.2, "next"),  # 2.5s gap -> a fresh line
+    ]
+    out = words_to_subtitle_segments(words, max_gap=0.6, min_duration=0.8)
+    for a, b in zip(out, out[1:], strict=False):
+        assert a.end <= b.start + 1e-6, (
+            f"subtitle lines overlap: [{a.start:.2f}, {a.end:.2f}] vs "
+            f"[{b.start:.2f}, {b.end:.2f}]"
+        )
+    # First short line is clamped to 0.8s (not stretched to 3.0s).
+    assert out[0].start == pytest.approx(0.0)
+    assert out[0].end == pytest.approx(0.8)
+    # The tail line is allowed to reach min_duration because nothing
+    # follows it.
+    assert out[-1].end == pytest.approx(3.8)
+
+
+def test_merge_short_segments_wont_exceed_max_chars() -> None:
+    """Over-limit merges keep the short line separate instead of making a long one."""
+    from veauto.models import SubtitleSegment
+    from veauto.transcriber import _merge_short_segments
+
+    segs = [
+        SubtitleSegment(start=0.0, end=1.0, text="a" * 30),
+        SubtitleSegment(start=1.2, end=1.25, text="b" * 30),
+    ]
+    out = _merge_short_segments(segs, min_duration=0.8, max_chars=40)
+    # Appending "b"*30 would make 61 chars (> 40), so the lines must
+    # not be glued together — but the short one is kept, not erased.
+    assert [s.text for s in out] == ["a" * 30, "b" * 30]
+
+
+def test_merge_short_segments_wont_bridge_long_gap() -> None:
+    """Short lines separated by a real silence are kept apart, not merged."""
+    from veauto.models import SubtitleSegment
+    from veauto.transcriber import _merge_short_segments
+
+    segs = [
+        SubtitleSegment(start=0.0, end=0.5, text="hello world"),
+        SubtitleSegment(start=3.0, end=3.2, text="next"),
+    ]
+    out = _merge_short_segments(segs, min_duration=0.8, max_gap=0.6)
+    assert [s.text for s in out] == ["hello world", "next"]
+
+
 # ---------------------------------------------------------------------------
 # transcribe_with_model — adapter
 # ---------------------------------------------------------------------------

@@ -192,6 +192,7 @@ def run_pipeline(
             result.media.duration,
             silences,
             margin=config.silence.margin,
+            min_keep_seconds=config.silence.min_keep_seconds,
         )
         result.cuts = cuts
         result.removed = removed

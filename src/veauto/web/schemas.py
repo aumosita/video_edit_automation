@@ -31,7 +31,14 @@ class JobOptions(BaseModel):
     # Silence stage
     noise_db: float = Field(default=-30.0, ge=-100.0, le=0.0)
     min_silence: float = Field(default=1.5, ge=0.0)
-    margin: float = Field(default=0.2, ge=0.0, le=5.0)
+    margin: float = Field(default=0.3, ge=0.0, le=5.0)
+    min_keep_seconds: float = Field(
+        default=0.15, ge=0.0, le=5.0,
+        description=(
+            "Drop kept segments shorter than this (removes glitch cuts "
+            "between two removed silences)."
+        ),
+    )
     no_silence: bool = False
 
     # Subtitle stage
@@ -57,7 +64,7 @@ class JobOptions(BaseModel):
     # Style
     style_position: Literal["top", "center", "bottom"] = "bottom"
     style_font: str = "Apple SD Gothic Neo"
-    style_font_size: int = Field(default=48, ge=8, le=400)
+    style_font_size: int = Field(default=56, ge=8, le=400)
     style_max_chars: int = Field(default=42, ge=5, le=200)
     style_max_lines: int = Field(default=2, ge=1, le=4)
     style_min_duration: float = Field(default=0.8, ge=0.1)
@@ -71,6 +78,7 @@ class JobOptions(BaseModel):
                 noise_db=self.noise_db,
                 min_silence=self.min_silence,
                 margin=self.margin,
+                min_keep_seconds=self.min_keep_seconds,
             ),
             subtitle=SubtitleConfig(
                 enabled=not self.no_subtitles,

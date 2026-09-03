@@ -62,8 +62,19 @@ def build_cut_segments(
     total_duration,
     silence_intervals,
     *,
-    margin=0.2,
+    margin=0.3,
+    min_keep_seconds=0.15,
 ):
+    """Build kept/cut segments, dropping sub-threshold keeps.
+
+    ``min_keep_seconds`` filters out the tiny ``CutSegment`` pieces that
+    survive *between two removed silences* (e.g. ``[3.0, 3.1]`` between
+    ``[2.9, 3.0]`` and ``[3.1, 3.2]``). Such sub-frame-ish clips read as
+    glitch cuts when the final edit plays back, so they are discarded
+    (merged into the surrounding silence). The very first and last
+    segments are kept even if short, since dropping the head/tail of a
+    video would be surprising.
+    """
     if total_duration <= 0:
         return [], []
     removed = [
@@ -75,10 +86,16 @@ def build_cut_segments(
         silence_intervals, margin=margin, total_duration=total_duration
     )
     kept = []
+    first = True
     cursor = 0.0
     for sil in expanded:
         if sil.start > cursor:
-            kept.append(CutSegment(source_in=cursor, source_out=sil.start))
+            piece = CutSegment(source_in=cursor, source_out=sil.start)
+            if first or (sil.start - cursor) >= min_keep_seconds:
+                kept.append(piece)
+            # else: a blink-of-the-eye clip between two silences —
+            # drop it, letting the *previous* silence absorb it.
+            first = False
         cursor = max(cursor, sil.end)
     if cursor < total_duration:
         kept.append(CutSegment(source_in=cursor, source_out=total_duration))

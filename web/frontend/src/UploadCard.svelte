@@ -11,7 +11,8 @@
   let computeType = $state("auto");
   let noiseDb = $state(-30.0);
   let minSilence = $state(1.5);
-  let margin = $state(0.2);
+  let margin = $state(0.3);
+  let minKeepSeconds = $state(0.15);
   let noSilence = $state(false);
   let noSubtitles = $state(false);
   let projectName = $state("Auto Edit");
@@ -57,6 +58,7 @@
       const job = await submitJob(file, {
         model, language, device, compute_type: computeType,
         noise_db: noiseDb, min_silence: minSilence, margin,
+        min_keep_seconds: minKeepSeconds,
         no_silence: noSilence, no_subtitles: noSubtitles,
         project_name: projectName, event_name: eventName,
       });
@@ -134,6 +136,9 @@
         </label>
         <label>Margin (s)
           <input type="number" step="0.05" min="0" bind:value={margin} />
+        </label>
+        <label>Min keep (s)
+          <input type="number" step="0.05" min="0" bind:value={minKeepSeconds} />
         </label>
         <label>Project name
           <input type="text" bind:value={projectName} />

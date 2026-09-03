@@ -186,3 +186,27 @@ def test_build_out_of_bounds_silences_filtered():
     kept, removed = build_cut_segments(10.0, sils, margin=0.0)
     assert [(c.source_in, c.source_out) for c in kept] == [(2.0, 3.0), (5.0, 8.0)]
     assert [(r.source_in, r.source_out) for r in removed] == [(3.0, 5.0), (0.0, 2.0)]
+
+
+def test_build_min_keep_drops_glitch_between_silences():
+    """A <0.15s 'speech' blip between two removed silences is dropped."""
+    sils = [
+        SilenceInterval(start=1.0, end=2.0),
+        SilenceInterval(start=2.1, end=3.0),  # 0.1s blip between them
+    ]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.0, min_keep_seconds=0.15)
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 1.0), (3.0, 10.0)]
+
+
+def test_build_min_keep_keeps_first_and_last():
+    # The head/tail of the video are kept even when shorter than the
+    # threshold — dropping them would silently remove content.
+    sils = [SilenceInterval(start=2.0, end=2.05)]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.0, min_keep_seconds=5.0)
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 2.0), (2.05, 10.0)]
+
+
+def test_build_min_keep_zero_is_noop():
+    sils = [SilenceInterval(start=1.0, end=2.0), SilenceInterval(start=2.1, end=3.0)]
+    kept, _ = build_cut_segments(10.0, sils, margin=0.0, min_keep_seconds=0.0)
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 1.0), (2.0, 2.1), (3.0, 10.0)]

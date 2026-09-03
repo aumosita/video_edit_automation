@@ -29,7 +29,7 @@ Current shape
                   <title ref="r3" lane="1"
                           offset="..." duration="...">
                     <text>
-                      <text-style font="..." fontSize="48" ...>
+                      <text-style font="..." fontSize="56" ...>
                         Hello
                       </text-style>
                     </text>

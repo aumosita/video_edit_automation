@@ -91,7 +91,7 @@ uv run veauto info ./samples/talk.mp4
 uv run veauto trim ./samples/talk.mp4 -o ./out/talk.fcpxml \
     --noise-db -30 \
     --min-silence 1.5 \
-    --margin 0.2
+    --margin 0.3
 
 # 3. 자막 자동 생성 (faster-whisper, 컷 없이 전체 타임라인)
 uv run veauto subtitles ./samples/talk.mp4 -o ./out/talk.fcpxml \
@@ -148,7 +148,8 @@ Frame rate: 30.000 fps
 | `-o`, `--output` | *(필수)* | 출력 FCPXML 경로 (필요 시 상위 디렉터리도 생성) |
 | `--noise-db` | `-30.0` | 침묵 임계값 (dB) |
 | `--min-silence` | `1.5` | 잘라낼 최소 침묵 길이 (초) |
-| `--margin` | `0.2` | 컷 양쪽에 남길 패딩 (초) |
+| `--margin` | `0.3` | 컷 양쪽에 남길 패딩 (초) |
+| `--min-keep-seconds` | `0.15` | 이보다 짧게 남은 조각 컷은 제거 (두 침묵 사이의 "글리치 컷" 방지) |
 | `--project-name` | `Auto Edit` | FCPXML의 `<project name="…">` |
 | `--event-name` | `veauto` | FCPXML의 `<event name="…">` |
 
@@ -157,6 +158,7 @@ Frame rate: 30.000 fps
 - **팟캐스트 / 강의** → `--noise-db -35 --min-silence 1.0`
 - **캐주얼 브이로그** → `--noise-db -25 --min-silence 0.8 --margin 0.1`
 - **소음 많은 환경** → `--noise-db -20 --min-silence 2.0`
+- **자연스러운 이어붙임** → `--margin 0.4 --min-keep-seconds 0.3` (문장 사이 여유 확보 + 초단조각 제거)
 
 ### `veauto subtitles <video> -o out.fcpxml [옵션]`
 
@@ -180,7 +182,7 @@ WAV로 추출되고, 전사 완료 후 삭제됩니다(`--keep-audio`로 보존 
 | --- | --- | --- |
 | `--style-position` | `bottom` | `top` / `center` / `bottom` |
 | `--style-font` | `Apple SD Gothic Neo` | 폰트 패밀리 |
-| `--style-font-size` | `48` | 폰트 크기 (8–400) |
+| `--style-font-size` | `56` | 폰트 크기 (8–400) |
 | `--style-max-chars` | `42` | 한 줄 최대 글자 수 |
 | `--style-max-lines` | `2` | 최대 줄 수 (1–4) |
 | `--style-min-duration` | `0.8` | 최소 표시 시간 (초) |

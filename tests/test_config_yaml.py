@@ -42,7 +42,7 @@ class TestYamlRoundTrip:
         assert cfg == cfg2
         assert cfg2.subtitle.style.position == "top"
         assert cfg2.subtitle.style.font_size == 64
-        assert cfg2.subtitle.style.shadow_offset == (2.0, -2.0)
+        assert cfg2.subtitle.style.shadow_offset == (2.0, 3.0)
 
     def test_to_yaml_is_unicode_safe(self):
         cfg = PipelineConfig(subtitle=SubtitleConfig(language="ko"))

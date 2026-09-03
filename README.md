@@ -39,7 +39,7 @@ Alpha. Core pipeline is implemented and tested (49/49 tests passing):
 
     veauto info input.mp4
 
-    veauto trim input.mp4 -o output.fcpxml --noise-db -30 --min-silence 1.5 --margin 0.2
+    veauto trim input.mp4 -o output.fcpxml --noise-db -30 --min-silence 1.5 --margin 0.3
 
 The output FCPXML can be imported into DaVinci Resolve, Final Cut Pro, or Adobe Premiere Pro.
 

@@ -18,7 +18,8 @@ class TestJobOptions:
         opts = JobOptions()
         assert opts.noise_db == -30.0
         assert opts.min_silence == 1.5
-        assert opts.margin == 0.2
+        assert opts.margin == 0.3
+        assert opts.min_keep_seconds == 0.15
         assert opts.model == "medium"
         assert opts.style_max_chars == 42
         assert opts.style_max_lines == 2

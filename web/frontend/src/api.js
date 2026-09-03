@@ -59,7 +59,7 @@ export function openGlobalSocket() {
  * Submit a job. ``file`` is a ``File`` instance; ``options`` is an
  * object whose keys mirror the backend query params:
  *
- *   noiseDb, minSilence, margin, noSilence, noSubtitles, model,
+ *   noiseDb, minSilence, margin, minKeepSeconds, model,
  *   language, device, computeType, projectName, eventName, ...
  */
 export function submitJob(file, options = {}) {
@@ -67,7 +67,8 @@ export function submitJob(file, options = {}) {
   const json = {
     noise_db: Number(options.noiseDb ?? -30),
     min_silence: Number(options.minSilence ?? 1.5),
-    margin: Number(options.margin ?? 0.2),
+    margin: Number(options.margin ?? 0.3),
+    min_keep_seconds: Number(options.minKeepSeconds ?? 0.15),
     no_silence: !!options.noSilence,
     no_subtitles: !!options.noSubtitles,
     model: options.model || "medium",

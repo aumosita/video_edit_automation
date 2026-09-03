@@ -129,19 +129,39 @@ def words_to_subtitle_segments(
     segments: list[SubtitleSegment] = []
     buffer: list[Word] = []
 
+    # The first word's start of the *next* buffer, set just before a
+    # flush. Used to clamp a min-duration extension so a subtitle never
+    # runs past the next line's onset (which would overlap in FCP and
+    # look out of sync). ``None`` means there is no next line, so the
+    # (last) subtitle may extend freely.
+    next_start: float | None = None
+
     def _flush(buf: list[Word]) -> SubtitleSegment | None:
+        nonlocal next_start
         if not buf:
             return None
         text = " ".join(w.text for w in buf)
         start = buf[0].start
         end = buf[-1].end
         if end - start < style_min:
+            # Short bursts are extended so the viewer has time to read
+            # them. When another line follows, the extension is clamped
+            # to the next line's onset so consecutive captions never
+            # overlap in FCP.
             end = start + style_min
+            if next_start is not None:
+                end = min(end, next_start - 1e-9)
+        if end - start <= 0:
+            return None
+        next_start = None
         return SubtitleSegment(start=start, end=end, text=text)
 
     for word in words:
         if not buffer:
             buffer.append(word)
+            if next_start is None:
+                # First buffer of the run; nothing before it to clamp.
+                next_start = word.start
             continue
 
         prospective_text = " ".join(w.text for w in buffer + [word])
@@ -154,6 +174,7 @@ def words_to_subtitle_segments(
             or gap > max_gap
         )
         if would_break:
+            next_start = word.start
             seg = _flush(buffer)
             if seg is not None:
                 segments.append(seg)
@@ -161,6 +182,9 @@ def words_to_subtitle_segments(
         else:
             buffer.append(word)
 
+    # The tail is the last line — let its min-duration extension run
+    # unclamped (FCP stays in sync because nothing follows it).
+    next_start = None
     tail = _flush(buffer)
     if tail is not None:
         segments.append(tail)
@@ -174,7 +198,9 @@ def words_to_subtitle_segments(
         final.extend(_split_long_segment(seg, max_duration, max_chars, max_chars_per_line))
 
     # Merge near-empty segments (< min_duration) into the next one.
-    final = _merge_short_segments(final, style_min)
+    final = _merge_short_segments(
+        final, style_min, max_duration, max_chars, max_gap
+    )
     return final
 
 
@@ -212,20 +238,47 @@ def _split_long_segment(
 def _merge_short_segments(
     segments: list[SubtitleSegment],
     min_duration: float,
+    max_duration: float | None = None,
+    max_chars: int | None = None,
+    max_gap: float | None = None,
 ) -> list[SubtitleSegment]:
-    """Merge short segments into the next one when possible."""
+    """Merge short segments into the previous one when possible.
+
+    A segment shorter than ``min_duration`` flashes on screen too
+    briefly to read. Merging it into the previous line keeps the
+    caption legible — but only when the merged line still respects
+    ``max_duration`` / ``max_chars`` and the two lines are close
+    enough in time (``max_gap``) to feel like one utterance. When a
+    merge is *not* allowed, the short segment is kept as-is rather
+    than dropped: erasing spoken content is worse than showing a
+    brief caption.
+    """
     if not segments:
         return []
     result: list[SubtitleSegment] = []
     for seg in segments:
         if result and seg.duration < min_duration:
             prev = result[-1]
+            gap_ok = (
+                max_gap is None
+                or (seg.start - prev.end) <= max_gap + 1e-6
+            )
             merged = SubtitleSegment(
                 start=prev.start,
                 end=max(prev.end, seg.end),
                 text=f"{prev.text} {seg.text}",
             )
-            result[-1] = merged
+            over_max = (
+                (max_duration is not None and merged.duration > max_duration)
+                or (max_chars is not None and len(merged.text) > max_chars)
+            )
+            if gap_ok and not over_max:
+                result[-1] = merged
+            else:
+                # Merging would create an over-long caption or bridge a
+                # big silence — keep the short line on its own instead
+                # of deleting it.
+                result.append(seg)
         else:
             result.append(seg)
     return result
