@@ -321,24 +321,36 @@ class JobManager:
             )
             self._check_cancel(job)
 
-            fcpxml_name = "output.fcpxml"
-            (job.output_dir / fcpxml_name).write_text(result.fcpxml, encoding="utf-8")
+            # Derive artefact filenames from the source video so
+            # downloading ``talk.fcpxml`` next to a ``talk.mp4`` is
+            # obvious. See :func:`veauto.web.utils._output_basename`.
+            from .utils import _output_basename
+            base = _output_basename(record.input_name,
+                                   fallback_id=record.id)
+            fcpxml_name = f"{base}.fcpxml"
+            srt_name = f"{base}.srt"
+            report_md_name = f"{base}.report.md"
+            report_json_name = f"{base}.report.json"
+
+            (job.output_dir / fcpxml_name).write_text(
+                result.fcpxml, encoding="utf-8"
+            )
 
             # Side-by-side SubRip (.srt) subtitles. Written next to
             # the FCPXML so users who don't want to deal with the XML
             # can import the SRT directly into any NLE or player.
-            srt_name = "output.srt"
-            from ..srt import write_srt
-            write_srt(result.subtitles, job.output_dir / srt_name)
+            if result.subtitles:
+                from ..srt import write_srt
+                write_srt(result.subtitles, job.output_dir / srt_name)
 
             self._set_status(job, "running", stage="writing", progress=0.97,
                              message="Writing report…")
             report_data = build_report_data(result)
-            (job.output_dir / "report.json").write_text(
+            (job.output_dir / report_json_name).write_text(
                 json.dumps(report_data, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
-            (job.output_dir / "report.md").write_text(
+            (job.output_dir / report_md_name).write_text(
                 self._render_markdown(report_data), encoding="utf-8"
             )
 
@@ -350,8 +362,8 @@ class JobManager:
                 record.kept_duration = result.kept_duration
                 record.removed_duration = result.removed_duration
                 record.fcpxml_name = fcpxml_name
-                record.report_md_name = "report.md"
-                record.report_json_name = "report.json"
+                record.report_md_name = report_md_name
+                record.report_json_name = report_json_name
                 record.srt_name = srt_name
 
             self._set_status(

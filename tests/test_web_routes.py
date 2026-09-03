@@ -38,6 +38,7 @@ def client(app_root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     def fake_run(self, job):  # type: ignore[ANN001]
         from veauto.web.jobs import JobCancelled
+        from veauto.web.utils import _output_basename
         result = PipelineResult(
             media=MediaInfo(
                 path=job.input_path,
@@ -64,18 +65,28 @@ def client(app_root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             return
         mgr._set_status(job, "running", stage="silence", progress=0.2)  # type: ignore[attr-defined]
         mgr._set_status(job, "running", stage="transcribing", progress=0.6)  # type: ignore[attr-defined]
-        (job.output_dir / "out.fcpxml").write_text(result.fcpxml, encoding="utf-8")
-        (job.output_dir / "report.md").write_text("# report\n", encoding="utf-8")
-        (job.output_dir / "report.json").write_text(
+        # Mirror the real _run_job: derive artefact names from the
+        # source filename so the test exercises the same code path.
+        base = _output_basename(job.record.input_name,
+                               fallback_id=job.record.id)
+        fcpxml_name = f"{base}.fcpxml"
+        srt_name = f"{base}.srt"
+        report_md_name = f"{base}.report.md"
+        report_json_name = f"{base}.report.json"
+        (job.output_dir / fcpxml_name).write_text(
+            result.fcpxml, encoding="utf-8"
+        )
+        (job.output_dir / report_md_name).write_text(
+            "# report\n", encoding="utf-8"
+        )
+        (job.output_dir / report_json_name).write_text(
             '{"ok": true}', encoding="utf-8"
         )
-        (job.output_dir / "out.srt").write_text(
+        (job.output_dir / srt_name).write_text(
             "1\n00:00:00,000 --> 00:00:01,000\ntest\n", encoding="utf-8"
         )
         # Mutate the record's stats in place (the same way the real
-        # _run_job does), then set the terminal status. The signature
-        # of _set_status does not accept ``result``/``fcpxml_path``;
-        # we update the record directly under the manager's lock.
+        # _run_job does), then set the terminal status.
         with mgr._lock:  # type: ignore[attr-defined]
             job.record.input_duration = result.media.duration
             job.record.num_silences = len(result.removed)
@@ -83,10 +94,10 @@ def client(app_root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             job.record.num_subtitles = len(result.subtitles)
             job.record.kept_duration = result.kept_duration
             job.record.removed_duration = result.removed_duration
-            job.record.fcpxml_name = "out.fcpxml"
-            job.record.report_md_name = "report.md"
-            job.record.report_json_name = "report.json"
-            job.record.srt_name = "out.srt"
+            job.record.fcpxml_name = fcpxml_name
+            job.record.report_md_name = report_md_name
+            job.record.report_json_name = report_json_name
+            job.record.srt_name = srt_name
         mgr._set_status(  # type: ignore[attr-defined]
             job,
             "completed",
@@ -144,18 +155,19 @@ class TestJobSubmission:
             time.sleep(0.05)
         assert r.json()["status"] == "completed"
         # All four artefacts must be exposed via download URLs once
-        # the job has finished.
+        # the job has finished. The base name is derived from the
+        # uploaded filename (``talk.mp4`` → ``talk``).
         assert r.json()["fcpxml_url"] == (
-            f"/api/jobs/{body['id']}/download/out.fcpxml"
+            f"/api/jobs/{body['id']}/download/talk.fcpxml"
         )
         assert r.json()["report_md_url"] == (
-            f"/api/jobs/{body['id']}/download/report.md"
+            f"/api/jobs/{body['id']}/download/talk.report.md"
         )
         assert r.json()["report_json_url"] == (
-            f"/api/jobs/{body['id']}/download/report.json"
+            f"/api/jobs/{body['id']}/download/talk.report.json"
         )
         assert r.json()["srt_url"] == (
-            f"/api/jobs/{body['id']}/download/out.srt"
+            f"/api/jobs/{body['id']}/download/talk.srt"
         )
 
     def test_download_srt_returns_text(
@@ -178,10 +190,52 @@ class TestJobSubmission:
             if r.json()["status"] in ("completed", "failed"):
                 break
             time.sleep(0.05)
-        r = client.get(f"/api/jobs/{body['id']}/download/out.srt")
+        r = client.get(f"/api/jobs/{body['id']}/download/talk.srt")
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("application/x-subrip")
         assert r.text.startswith("1\n00:00:00,000 --> 00:00:01,000\n")
+
+    def test_artefact_names_track_source_filename(
+        self, client: TestClient, app_root: Path
+    ):
+        """The four artefacts (.fcpxml, .srt, .report.md,
+        .report.json) must be named after the uploaded source file
+        so downloading them in the browser shows a clear
+        relationship with the original.
+
+        ``My Talk (v2).mov`` → ``My_Talk_v2.fcpxml`` etc.
+        """
+        r = client.post(
+            "/api/jobs",
+            params={"options": '{"model": "tiny"}'},
+            files={
+                "file": (
+                    "My Talk (v2).mov",
+                    io.BytesIO(b"\x00" * 256),
+                    "video/quicktime",
+                ),
+            },
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            r = client.get(f"/api/jobs/{body['id']}")
+            if r.json()["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+        jid = body["id"]
+        assert r.json()["status"] == "completed"
+        assert r.json()["fcpxml_url"].endswith("/My_Talk_v2.fcpxml")
+        assert r.json()["srt_url"].endswith("/My_Talk_v2.srt")
+        assert r.json()["report_md_url"].endswith("/My_Talk_v2.report.md")
+        assert r.json()["report_json_url"].endswith("/My_Talk_v2.report.json")
+        # The downloaded file content must also use the new name.
+        r = client.get(f"/api/jobs/{jid}/download/My_Talk_v2.fcpxml")
+        assert r.status_code == 200
+        # The old hard-coded ``out.fcpxml`` must no longer exist.
+        r = client.get(f"/api/jobs/{jid}/download/out.fcpxml")
+        assert r.status_code == 404
 
     def test_empty_file_rejected(self, client: TestClient):
         r = client.post(
