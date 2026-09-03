@@ -55,7 +55,7 @@ jobs:
           ffprobe -version | head -1
 
       - name: Sync dependencies
-        run: uv sync --extra dev --python ${{ matrix.python-version }}
+        run: uv sync --extra dev --extra web --python ${{ matrix.python-version }}
 
       - name: Ruff (lint)
         run: uv run --python ${{ matrix.python-version }} ruff check .
