@@ -150,6 +150,117 @@ class TestCancellation:
 
 
 # ---------------------------------------------------------------------------
+# Failure diagnostics: error.log, error_traceback, error_kind, error_stage
+# ---------------------------------------------------------------------------
+
+
+class TestJobFailure:
+    """A worker that crashes mid-pipeline must leave a ``error.log``
+    next to the output artefacts and fill the diagnostic fields on the
+    :class:`JobRecord` so the UI can surface the cause.
+    """
+
+    def test_exception_writes_error_log_and_fills_record(
+        self, manager: JobManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from veauto import pipeline as pl
+
+        def _explode(*_a, **_kw):
+            raise RuntimeError("boom from fake pipeline")
+
+        # ``_run_pipeline_with_progress`` calls ``pl.run_pipeline``
+        # directly, so we patch the pipeline module's symbol.
+        monkeypatch.setattr(pl, "run_pipeline", _explode)
+
+        v = _write_dummy_video(tmp_path)
+        loop = asyncio.new_event_loop()
+        try:
+            rec = manager.submit(
+                input_path=v,
+                input_name="x.mp4",
+                input_size=1,
+                options=JobOptions(),
+                loop=loop,
+            )
+        finally:
+            loop.close()
+
+        _wait_for(lambda: manager.get(rec.id).status == "failed")
+        job = manager._jobs[rec.id]  # type: ignore[attr-defined]
+        final = job.record
+        # Status + summary populated.
+        assert final.status == "failed"
+        assert final.error is not None and "RuntimeError" in final.error
+        assert "boom from fake pipeline" in final.error
+        # New diagnostic fields populated.
+        assert final.error_kind == "exception"
+        assert final.error_stage is not None
+        assert final.error_traceback is not None
+        assert "RuntimeError" in final.error_traceback
+        # error.log file written and wired into the record.
+        assert final.error_log_name == "error.log"
+        log_path = manager.job_dir(rec.id) / "error.log"
+        assert log_path.exists()
+        body = log_path.read_text(encoding="utf-8")
+        assert "boom from fake pipeline" in body
+        assert "traceback" in body.lower()
+        # Surface file to the UI as a download URL.
+        assert final.with_download_urls().error_log_url is not None
+        assert final.with_download_urls().error_log_url.endswith("/error.log")
+
+    def test_cancellation_records_kind_and_stage(
+        self, manager: JobManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A clean user cancel should be reported as ``cancelled`` (not
+        ``failed``) and carry the last-known pipeline stage so the user
+        can see *where* the cancel hit."""
+        import threading
+
+        from veauto import pipeline as pl
+
+        # Block inside run_pipeline until the test trips the cancel event.
+        proceed = threading.Event()
+
+        def _slow(*_a, **_kw):
+            proceed.wait(timeout=5.0)
+            # Even if the test fails to cancel, raise the cancel error so
+            # the worker still terminates.
+            raise JobCancelled()
+
+        monkeypatch.setattr(pl, "run_pipeline", _slow)
+
+        v = _write_dummy_video(tmp_path)
+        loop = asyncio.new_event_loop()
+        try:
+            rec = manager.submit(
+                input_path=v,
+                input_name="x.mp4",
+                input_size=1,
+                options=JobOptions(),
+                loop=loop,
+            )
+        finally:
+            loop.close()
+
+        # Give the worker a moment to enter run_pipeline, then cancel.
+        time.sleep(0.05)
+        assert manager.cancel(rec.id) is True
+        proceed.set()
+
+        _wait_for(
+            lambda: manager.get(rec.id).status in ("failed", "cancelled"),
+            timeout=3.0,
+        )
+        final = manager.get(rec.id)
+        assert final.status == "cancelled"
+        assert final.error_kind == "cancelled"
+        assert final.error_stage is not None
+        # No error.log is written for clean cancels — the summary line
+        # on the badge is enough.
+        assert final.error_log_name is None
+
+
+# ---------------------------------------------------------------------------
 # Subscribe / unsubscribe
 # ---------------------------------------------------------------------------
 

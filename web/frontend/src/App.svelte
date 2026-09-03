@@ -7,6 +7,17 @@
   let ws = null;
   let reconnectTimer = null;
   let pollTimer = null;
+  // Per-job toggle for the expanded error details row. Using a Set
+  // keeps each row's expand state independent of WS re-renders.
+  let expandedErrors = $state(new Set());
+
+  function toggleError(id) {
+    // Reassign a fresh Set so Svelte's reactivity picks up the change.
+    const next = new Set(expandedErrors);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    expandedErrors = next;
+  }
 
   onMount(async () => {
     await refresh();
@@ -194,9 +205,34 @@
                 {#if job.srt_url}
                   <a class="link" href={job.srt_url} target="_blank" rel="noopener">.srt</a>
                 {/if}
+                {#if job.error_log_url}
+                  <a class="link danger" href={job.error_log_url} target="_blank" rel="noopener">log</a>
+                {/if}
+                {#if (job.status === "failed" || job.status === "cancelled") && (job.error || job.error_traceback)}
+                  <button class="link" onclick={() => toggleError(job.id)}>
+                    {expandedErrors.has(job.id) ? "Hide" : "Details"}
+                  </button>
+                {/if}
                 <button class="link danger" onclick={() => onDelete(job.id)}>Delete</button>
               </td>
             </tr>
+            {#if (job.status === "failed" || job.status === "cancelled") && expandedErrors.has(job.id) && (job.error || job.error_traceback)}
+              <tr class="row-detail row-{statusClass(job.status)}">
+                <td colspan="10" class="cell-error">
+                  <div class="err-head">
+                    <strong>{job.error_kind === "cancelled" ? "Cancelled" : "Failed"}</strong>
+                    {#if job.error_stage}<span class="err-stage">stage: {job.error_stage}</span>{/if}
+                    {#if job.error_kind}<span class="err-kind">{job.error_kind}</span>{/if}
+                  </div>
+                  {#if job.error}
+                    <div class="err-summary">{job.error}</div>
+                  {/if}
+                  {#if job.error_traceback}
+                    <pre class="err-trace">{job.error_traceback}</pre>
+                  {/if}
+                </td>
+              </tr>
+            {/if}
           {/each}
         </tbody>
       </table>

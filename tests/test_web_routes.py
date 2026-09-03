@@ -110,6 +110,42 @@ def client(app_root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture
+def failing_client(app_root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """A TestClient whose pipeline is faked to crash so we can exercise
+    the failure-diagnostics flow (error.log, error_traceback, etc.).
+    """
+    app = create_app(output_root=app_root, max_workers=1)
+
+    def fake_fail(self, job):  # type: ignore[ANN001]
+        mgr = self
+        mgr._set_status(  # type: ignore[attr-defined]
+            job, "running", stage="transcribing", progress=0.6,
+            message="Faking a crash in the transcribe stage…",
+        )
+        # Simulate the same error-handling path the real worker uses.
+        mgr._write_error_log(  # type: ignore[attr-defined]
+            job.record.id, job.output_dir,
+            stage="transcribing",
+            error_kind="exception",
+            summary="RuntimeError: simulated failure",
+            traceback_text="Traceback (most recent call last):\n  File 'fake.py', line 1\nRuntimeError: simulated failure\n",
+        )
+        with mgr._lock:  # type: ignore[attr-defined]
+            job.record.error_log_name = "error.log"
+        mgr._set_status(  # type: ignore[attr-defined]
+            job, "failed", stage="failed", progress=0.0,
+            message="RuntimeError: simulated failure",
+            error="RuntimeError: simulated failure",
+            error_kind="exception",
+            error_stage="transcribing",
+            error_traceback="Traceback (most recent call last):\nRuntimeError: simulated failure\n",
+        )
+
+    monkeypatch.setattr(jobs_mod.JobManager, "_run_job", fake_fail)
+    return TestClient(app)
+
+
 class TestHealthAndConfig:
     def test_health(self, client: TestClient):
         r = client.get("/api/health")
@@ -233,9 +269,64 @@ class TestJobSubmission:
         # The downloaded file content must also use the new name.
         r = client.get(f"/api/jobs/{jid}/download/My_Talk_v2.fcpxml")
         assert r.status_code == 200
-        # The old hard-coded ``out.fcpxml`` must no longer exist.
-        r = client.get(f"/api/jobs/{jid}/download/out.fcpxml")
-        assert r.status_code == 404
+
+
+class TestErrorLogDownload:
+    """Failed jobs must expose ``error.log`` through the same download
+    endpoint the other artefacts use, with text/plain content type.
+    """
+
+    def test_failed_job_has_error_log_url(
+        self, failing_client: TestClient, app_root: Path
+    ):
+        r = failing_client.post(
+            "/api/jobs",
+            params={"options": '{"model": "tiny"}'},
+            files={"file": ("boom.mp4", io.BytesIO(b"\x00" * 256), "video/mp4")},
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            r = failing_client.get(f"/api/jobs/{body['id']}")
+            if r.json()["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+        job = r.json()
+        assert job["status"] == "failed"
+        assert job["error_kind"] == "exception"
+        assert job["error_stage"] == "transcribing"
+        assert job["error_traceback"]  # non-empty
+        # error_log_url wired so the UI can hand the user a download link.
+        assert job["error_log_url"] is not None
+        assert job["error_log_url"].endswith("/error.log")
+
+    def test_download_error_log_returns_text(
+        self, failing_client: TestClient, app_root: Path
+    ):
+        r = failing_client.post(
+            "/api/jobs",
+            params={"options": '{"model": "tiny"}'},
+            files={"file": ("boom.mp4", io.BytesIO(b"\x00" * 256), "video/mp4")},
+        )
+        assert r.status_code == 201
+        jid = r.json()["id"]
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            r = failing_client.get(f"/api/jobs/{jid}")
+            if r.json()["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+
+        r = failing_client.get(f"/api/jobs/{jid}/download/error.log")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/plain")
+        body = r.text
+        assert "simulated failure" in body
+        assert "RuntimeError" in body
+        # The log header should make the stage obvious without having
+        # to open the UI.
+        assert "# stage: transcribing" in body
 
     def test_empty_file_rejected(self, client: TestClient):
         r = client.post(

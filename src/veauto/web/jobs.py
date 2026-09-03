@@ -32,6 +32,7 @@ import json
 import logging
 import threading
 import time
+import traceback as _tb
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -373,13 +374,40 @@ class JobManager:
             )
             logger.info("Job %s completed", record.id)
         except JobCancelled:
-            self._set_status(job, "cancelled", stage="cancelled", progress=0.0,
-                             message="Cancelled by user.")
+            self._set_status(
+                job, "cancelled",
+                stage="cancelled", progress=0.0,
+                message="Cancelled by user.",
+                error="Cancelled by user.",
+                error_kind="cancelled",
+                error_stage=_stage_name[0] or None,
+            )
             logger.info("Job %s cancelled", record.id)
         except Exception as exc:  # noqa: BLE001
+            tb_text = _tb.format_exc()
+            summary = f"{type(exc).__name__}: {exc}"
+            # Persist a diagnostic log next to any output artefacts so
+            # the user can download it from the web UI. We keep the
+            # last-known stage and a wall-clock timestamp so the file
+            # alone is enough to reconstruct *when* the worker died.
+            log_path = self._write_error_log(
+                record.id, job.output_dir,
+                stage=_stage_name[0] or "",
+                error_kind="exception",
+                summary=summary,
+                traceback_text=tb_text,
+            )
+            with self._lock:
+                if log_path is not None:
+                    record.error_log_name = log_path.name
             self._set_status(
-                job, "failed", stage="failed", progress=0.0,
-                message="", error=f"{type(exc).__name__}: {exc}",
+                job, "failed",
+                stage="failed", progress=0.0,
+                message=summary,
+                error=summary,
+                error_kind="exception",
+                error_stage=_stage_name[0] or None,
+                error_traceback=tb_text,
             )
             logger.exception("Job %s failed", record.id)
         finally:
@@ -393,6 +421,42 @@ class JobManager:
     def _render_markdown(data: dict) -> str:
         from ._report_md import render_markdown_report
         return render_markdown_report(data)
+
+    @staticmethod
+    def _write_error_log(
+        job_id: str,
+        output_dir: Path,
+        *,
+        stage: str,
+        error_kind: str,
+        summary: str,
+        traceback_text: str,
+    ) -> Path | None:
+        """Persist a diagnostic log to ``<output_dir>/error.log``.
+
+        Returns the file path, or ``None`` if writing failed. The
+        caller wires the filename into :class:`JobRecord` so the web
+        UI can expose it as a download.
+        """
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            log_path = output_dir / "error.log"
+            payload = (
+                f"# veauto job {job_id} failed\n"
+                f"# timestamp: {datetime.now(tz=UTC).isoformat()}\n"
+                f"# stage: {stage or '(unknown)'}\n"
+                f"# kind: {error_kind}\n"
+                f"# error: {summary}\n"
+                f"\n--- traceback ---\n"
+                f"{traceback_text}\n"
+            )
+            log_path.write_text(payload, encoding="utf-8")
+            return log_path
+        except OSError as exc:  # pragma: no cover - filesystem errors
+            logger.warning(
+                "Could not write error.log for job %s: %s", job_id, exc
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Pipeline with progress hooks
@@ -541,6 +605,9 @@ class JobManager:
         progress: float | None = None,
         message: str | None = None,
         error: str | None = None,
+        error_kind: str | None = None,
+        error_stage: str | None = None,
+        error_traceback: str | None = None,
     ) -> None:
         rec = job.record
         now = datetime.now(tz=UTC)
@@ -558,6 +625,12 @@ class JobManager:
                 rec.message = message
             if error is not None:
                 rec.error = error
+            if error_kind is not None:
+                rec.error_kind = error_kind  # type: ignore[assignment]
+            if error_stage is not None:
+                rec.error_stage = error_stage
+            if error_traceback is not None:
+                rec.error_traceback = error_traceback
             snapshot = rec.model_copy(deep=True)
             subs = list(job.subscribers)
             loop = job.loop

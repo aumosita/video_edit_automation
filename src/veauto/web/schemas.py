@@ -131,11 +131,23 @@ class JobRecord(BaseModel):
     progress: float = 0.0
     stage: str = "queued"
     message: str = ""
+    # --- Failure diagnostics -----------------------------------------
+    # ``error`` is a one-line human summary safe for a badge/tooltip.
+    # ``error_traceback`` is the full stack trace (multi-line) for a
+    # detail view in the UI, and ``error_stage`` records which pipeline
+    # stage the worker was in when the failure happened. ``error_kind``
+    # distinguishes a clean cancel from an exception so the UI can show
+    # "cancelled by user" instead of "failed" when appropriate.
     error: str | None = None
+    error_kind: Literal["exception", "cancelled", "timeout", "unknown"] | None = None
+    error_stage: str | None = None
+    error_traceback: str | None = None
+    # ---------------------------------------------------------------
     fcpxml_name: str | None = None
     report_md_name: str | None = None
     report_json_name: str | None = None
     srt_name: str | None = None
+    error_log_name: str | None = None
     # Statistics filled in at the end
     num_silences: int | None = None
     num_cuts: int | None = None
@@ -147,6 +159,7 @@ class JobRecord(BaseModel):
     report_md_url: str | None = None
     report_json_url: str | None = None
     srt_url: str | None = None
+    error_log_url: str | None = None
 
     def with_download_urls(self) -> JobRecord:
         """Return a shallow copy whose ``*_url`` fields point at this
@@ -165,6 +178,7 @@ class JobRecord(BaseModel):
                 "report_md_url": base + self.report_md_name if self.report_md_name else None,
                 "report_json_url": base + self.report_json_name if self.report_json_name else None,
                 "srt_url": base + self.srt_name if self.srt_name else None,
+                "error_log_url": base + self.error_log_name if self.error_log_name else None,
             }
         )
 

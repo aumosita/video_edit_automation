@@ -155,6 +155,8 @@ async def download_artefact(job_id: str, name: str) -> FileResponse:
         # subtitles; some browsers (Safari) treat plain ``text/plain``
         # as safe, others prefer the explicit content type.
         media_type = "application/x-subrip; charset=utf-8"
+    elif name.endswith(".log"):
+        media_type = "text/plain; charset=utf-8"
     return FileResponse(target, media_type=media_type, filename=name)
 
 
