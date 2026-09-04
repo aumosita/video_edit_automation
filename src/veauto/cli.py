@@ -29,7 +29,12 @@ from .models import (
     SubtitleStyle,
 )
 from .segments import build_cut_segments
-from .silence import detect_silence, ensure_ffmpeg_available, probe_media_info
+from .silence import (
+    detect_silence,
+    ensure_ffmpeg_available,
+    probe_media_info,
+    resolve_noise_db,
+)
 from .transcriber import transcribe, words_to_subtitle_segments
 
 app = typer.Typer(
@@ -69,6 +74,17 @@ def trim(
     input_path: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True),
     output: Path = typer.Option(..., '-o', '--output', help='Output FCPXML path.'),
     noise_db: float = typer.Option(-30.0, '--noise-db', help='Silence threshold in dB.'),
+    auto_threshold: bool = typer.Option(
+        False, '--auto-threshold',
+        help='Derive the silence threshold from the file\'s own loudness '
+             'profile. Recommended for quiet recordings.',
+    ),
+    threshold_offset: float = typer.Option(
+        0.0, '--threshold-offset', min=-30.0, max=30.0,
+        help='Relative adjustment (dB) applied to the auto-derived '
+             'threshold. Negative = keep more audio, positive = cut more. '
+             'Ignored without --auto-threshold.',
+    ),
     min_silence: float = typer.Option(1.5, '--min-silence', help='Min silence length (s).'),
     margin: float = typer.Option(0.3, '--margin', help='Padding kept on each side of cut (s).'),
     min_keep_seconds: float = typer.Option(
@@ -84,11 +100,14 @@ def trim(
     console.print(f'[bold]Probing:[/bold] {media.path} ({media.duration:.2f}s)')
 
     sil_cfg = SilenceConfig(
-        noise_db=noise_db, min_silence=min_silence, margin=margin,
+        noise_db=noise_db, auto_noise_db=auto_threshold,
+        noise_db_offset=threshold_offset,
+        min_silence=min_silence, margin=margin,
         min_keep_seconds=min_keep_seconds, enabled=True,
     )
+    effective_db = resolve_noise_db(input_path, sil_cfg)
     intervals = detect_silence(input_path, sil_cfg)
-    console.print(f'[bold]Silences:[/bold] {len(intervals)} (>= {min_silence}s, <= {noise_db}dB)')
+    console.print(f'[bold]Silences:[/bold] {len(intervals)} (>= {min_silence}s, <= {effective_db:.1f}dB)')
     kept, removed = build_cut_segments(
         media.duration, intervals, margin=margin, min_keep_seconds=min_keep_seconds
     )
@@ -235,6 +254,17 @@ def run(
     output: Path = typer.Option(..., '-o', '--output', help='Output FCPXML path.'),
     # Silence stage
     noise_db: float = typer.Option(-30.0, '--noise-db'),
+    auto_threshold: bool = typer.Option(
+        False, '--auto-threshold',
+        help="Derive the silence threshold from the file's own loudness "
+             "profile. Recommended for quiet recordings.",
+    ),
+    threshold_offset: float = typer.Option(
+        0.0, '--threshold-offset', min=-30.0, max=30.0,
+        help='Relative adjustment (dB) applied to the auto-derived '
+             'threshold. Negative = keep more audio, positive = cut more. '
+             'Ignored without --auto-threshold.',
+    ),
     min_silence: float = typer.Option(1.5, '--min-silence'),
     margin: float = typer.Option(0.3, '--margin'),
     min_keep_seconds: float = typer.Option(
@@ -243,7 +273,21 @@ def run(
     ),
     no_silence: bool = typer.Option(False, '--no-silence', help='Skip the silence-removal stage.'),
     # Subtitle stage
-    no_subtitles: bool = typer.Option(False, '--no-subtitles', help='Skip the STT stage.'),
+    no_subtitles: bool = typer.Option(
+        False, '--no-subtitles',
+        help='Skip the STT stage and produce no subtitles in the FCPXML. '
+             'Equivalent to --subtitle-target none.',
+    ),
+    subtitle_target: str = typer.Option(
+        'both', '--subtitle-target',
+        help=(
+            "Where to put subtitles. one of {srt,fcpxml,both,none}. "
+            "'srt' = STT runs, SRT is produced, FCPXML is caption-free. "
+            "'both' = SRT + FCPXML (default). 'none' = skip STT entirely "
+            "(same as --no-subtitles). 'fcpxml' = reserved."
+        ),
+        show_default=True,
+    ),
     model: str = typer.Option('medium', '--model'),
     language: str | None = typer.Option(None, '--language'),
     device: str = typer.Option('auto', '--device'),
@@ -323,11 +367,25 @@ def run(
     #    *defaults* layer.
     cfg.silence.enabled = not no_silence
     cfg.silence.noise_db = noise_db
+    cfg.silence.auto_noise_db = auto_threshold
+    cfg.silence.noise_db_offset = threshold_offset
     cfg.silence.min_silence = min_silence
     cfg.silence.margin = margin
     cfg.silence.min_keep_seconds = min_keep_seconds
 
     cfg.subtitle.enabled = not no_subtitles
+
+    # Resolve --subtitle-target. --no-subtitles takes precedence so the
+    # legacy flag keeps behaving exactly as before.
+    if no_subtitles:
+        cfg.subtitle.target = "none"
+    else:
+        valid = ("srt", "fcpxml", "both", "none")
+        if subtitle_target not in valid:
+            raise typer.BadParameter(
+                f"--subtitle-target must be one of {valid}, got {subtitle_target!r}"
+            )
+        cfg.subtitle.target = subtitle_target  # type: ignore[assignment]
     cfg.subtitle.model = model  # type: ignore[assignment]
     cfg.subtitle.language = language
     cfg.subtitle.device = device  # type: ignore[assignment]
@@ -371,9 +429,13 @@ def run(
         _audio.extract_audio = original_extract  # type: ignore[assignment]
 
     console.print(f'[bold]Probing:[/bold] {result.media.path} ({result.media.duration:.2f}s)')
+    effective_db = (
+        resolve_noise_db(input_path, cfg.silence)
+        if cfg.silence.enabled else cfg.silence.noise_db
+    )
     console.print(
         f'[bold]Silences:[/bold] {len(result.removed)} '
-        f'(>= {min_silence}s, <= {noise_db}dB)'
+        f'(>= {min_silence}s, <= {effective_db:.1f}dB)'
     )
     console.print(
         f'[bold]Kept:[/bold] {len(result.cuts)} segments, '

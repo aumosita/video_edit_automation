@@ -30,6 +30,21 @@ class JobOptions(BaseModel):
 
     # Silence stage
     noise_db: float = Field(default=-30.0, ge=-100.0, le=0.0)
+    auto_noise_db: bool = Field(
+        default=False,
+        description=(
+            "Derive the silence threshold from the file's own loudness "
+            "profile instead of the fixed noise_db. Recommended for quiet "
+            "recordings."
+        ),
+    )
+    noise_db_offset: float = Field(
+        default=0.0, ge=-30.0, le=30.0,
+        description=(
+            "Relative adjustment (dB) applied to the auto-derived "
+            "threshold. Ignored in fixed mode."
+        ),
+    )
     min_silence: float = Field(default=1.5, ge=0.0)
     margin: float = Field(default=0.3, ge=0.0, le=5.0)
     min_keep_seconds: float = Field(
@@ -43,6 +58,15 @@ class JobOptions(BaseModel):
 
     # Subtitle stage
     no_subtitles: bool = False
+    subtitle_target: Literal["srt", "fcpxml", "both", "none"] | None = Field(
+        default=None,
+        description=(
+            "Where to put subtitles. 'srt' = SRT only, "
+            "'fcpxml' = reserved, 'both' = SRT + FCPXML (default), "
+            "'none' = skip STT entirely.  When set, overrides "
+            "no_subtitles."
+        ),
+    )
     model: Literal[
         "tiny", "base", "small", "medium", "large-v3", "distil-large-v3"
     ] = "medium"
@@ -65,23 +89,71 @@ class JobOptions(BaseModel):
     style_position: Literal["top", "center", "bottom"] = "bottom"
     style_font: str = "Apple SD Gothic Neo"
     style_font_size: int = Field(default=56, ge=8, le=400)
+    style_bold: bool = True
+    # Hex colour like "#FFFFFF". Converted to FCPXML "R G B 1" floats
+    # in ``to_pipeline_config``.
+    style_color: str = "#FFFFFF"
+    style_offset_y: int = Field(
+        default=0, ge=-540, le=540,
+        description="Fine-tune Y position in pixels at 1080p.",
+    )
+    style_template: Literal["text", "lower_third"] = Field(
+        default="text",
+        description=(
+            "'text' = static title, no fade (default). "
+            "'lower_third' = animated Lower Third Text."
+        ),
+    )
     style_max_chars: int = Field(default=42, ge=5, le=200)
     style_max_lines: int = Field(default=2, ge=1, le=4)
     style_min_duration: float = Field(default=0.8, ge=0.1)
     style_max_duration: float = Field(default=6.0, ge=0.5)
 
+    @staticmethod
+    def _hex_to_fcpxml_color(hex_color: str) -> str:
+        """Convert ``#RRGGBB`` to an FCPXML ``"R G B 1"`` float string.
+
+        Unparsable input falls back to white so a bad colour value can
+        never fail the whole job.
+        """
+        import re as _re
+
+        m = _re.fullmatch(r"#?([0-9a-fA-F]{6})", (hex_color or "").strip())
+        if not m:
+            return "1 1 1 1"
+        v = m.group(1)
+        r, g, b = (int(v[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+        return f"{r:.4f} {g:.4f} {b:.4f} 1"
+
     def to_pipeline_config(self) -> PipelineConfig:
         """Translate these options into a :class:`PipelineConfig`."""
+        # Resolve subtitle target. `subtitle_target` is the modern field;
+        # `no_subtitles` is kept for backwards-compat and maps to "none".
+        if self.subtitle_target is not None:
+            target = self.subtitle_target
+        elif self.no_subtitles:
+            target = "none"
+        else:
+            target = "both"
+
         return PipelineConfig(
             silence=SilenceConfig(
                 enabled=not self.no_silence,
                 noise_db=self.noise_db,
+                auto_noise_db=self.auto_noise_db,
+                noise_db_offset=self.noise_db_offset,
                 min_silence=self.min_silence,
                 margin=self.margin,
                 min_keep_seconds=self.min_keep_seconds,
             ),
             subtitle=SubtitleConfig(
-                enabled=not self.no_subtitles,
+                target=target,
+                # `enabled` = "should STT run?". The model's
+                # `stt_enabled` property treats `target="none"` OR
+                # `enabled=False` as "skip". For `target="fcpxml"` the
+                # user has opted out of STT (captions are reserved /
+                # manually authored) so we also set enabled=False.
+                enabled=target in ("srt", "both"),
                 model=self.model,
                 language=self.language,
                 device=self.device,
@@ -90,8 +162,12 @@ class JobOptions(BaseModel):
                 offset=self.subtitle_offset,
                 style=SubtitleStyle(
                     position=self.style_position,
+                    offset_y=self.style_offset_y,
+                    template=self.style_template,
                     font=self.style_font,
                     font_size=self.style_font_size,
+                    bold=self.style_bold,
+                    color=self._hex_to_fcpxml_color(self.style_color),
                     max_chars_per_line=self.style_max_chars,
                     max_lines=self.style_max_lines,
                     min_duration=self.style_min_duration,

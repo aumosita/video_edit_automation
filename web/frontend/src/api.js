@@ -66,17 +66,33 @@ export function submitJob(file, options = {}) {
   const params = new URLSearchParams();
   const json = {
     noise_db: Number(options.noiseDb ?? -30),
+    auto_noise_db: !!options.autoNoiseDb,
+    noise_db_offset: Number(options.noiseDbOffset ?? 0),
     min_silence: Number(options.minSilence ?? 1.5),
     margin: Number(options.margin ?? 0.3),
     min_keep_seconds: Number(options.minKeepSeconds ?? 0.15),
     no_silence: !!options.noSilence,
     no_subtitles: !!options.noSubtitles,
+    // `subtitle_target` is the new 4-way control: srt | fcpxml | both | none.
+    // Only send it when the caller explicitly picked one, so the backend
+    // can fall back to `no_subtitles` / "both" for old clients.
+    ...(options.subtitle_target != null
+        ? { subtitle_target: options.subtitle_target }
+        : {}),
     model: options.model || "medium",
     language: options.language || null,
     device: options.device || "auto",
     compute_type: options.computeType || "auto",
     project_name: options.projectName || "Auto Edit",
     event_name: options.eventName || "veauto",
+    style_position: options.style_position || "bottom",
+    style_font: options.style_font || "Apple SD Gothic Neo",
+    style_font_size: Number(options.style_font_size ?? 56),
+    style_bold: options.style_bold !== false,
+    style_color: options.style_color || "#FFFFFF",
+    style_offset_y: Number(options.style_offset_y ?? 0),
+    style_template: options.style_template || "text",
+    subtitle_offset: Number(options.subtitle_offset ?? 0),
   };
   params.set("options", JSON.stringify(json));
   const fd = new FormData();

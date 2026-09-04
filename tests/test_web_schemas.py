@@ -119,10 +119,58 @@ class TestJobRecordDownloadUrls:
         assert cfg.subtitle.style.position == "top"
         assert cfg.silence.enabled is True
         assert cfg.subtitle.enabled is False
+        # `no_subtitles=True` maps to target="none" by default
+        assert cfg.subtitle.target == "none"
+
+    @pytest.mark.parametrize(
+        "kwargs,expected_target,expected_stt,expected_in_fcpxml",
+        [
+            # default: no flag, no override => "both"
+            ({}, "both", True, True),
+            # srt only: STT runs but FCPXML has no captions
+            ({"subtitle_target": "srt"}, "srt", True, False),
+            # both: explicit
+            ({"subtitle_target": "both"}, "both", True, True),
+            # none: skip everything
+            ({"subtitle_target": "none"}, "none", False, False),
+            # fcpxml: reserved. Without STT results there's nothing to
+            # bake, so the resolved `in_fcpxml` is False at runtime.
+            ({"subtitle_target": "fcpxml"}, "fcpxml", False, False),
+            # legacy no_subtitles still works on its own
+            ({"no_subtitles": True}, "none", False, False),
+            # subtitle_target wins over no_subtitles
+            ({"subtitle_target": "srt", "no_subtitles": True}, "srt", True, False),
+        ],
+    )
+    def test_subtitle_target_resolution(
+        self, kwargs, expected_target, expected_stt, expected_in_fcpxml
+    ):
+        cfg = JobOptions(**kwargs).to_pipeline_config()
+        assert cfg.subtitle.target == expected_target
+        assert cfg.subtitle.stt_enabled is expected_stt
+        assert cfg.subtitle.in_fcpxml is expected_in_fcpxml
+        # `enabled` should match stt_enabled for all current targets.
+        assert cfg.subtitle.enabled is expected_stt
+
+    def test_subtitle_target_invalid_raises(self):
+        with pytest.raises(ValidationError):
+            JobOptions(subtitle_target="bogus")
 
     def test_no_silence_disables_stage(self):
         cfg = JobOptions(no_silence=True).to_pipeline_config()
         assert cfg.silence.enabled is False
+
+    def test_noise_db_offset_passes_through(self):
+        cfg = JobOptions(auto_noise_db=True, noise_db_offset=-5.0).to_pipeline_config()
+        assert cfg.silence.auto_noise_db is True
+        assert cfg.silence.noise_db_offset == -5.0
+
+    def test_noise_db_offset_bounds(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            JobOptions(noise_db_offset=31.0)
+        with pytest.raises(ValidationError):
+            JobOptions(noise_db_offset=-31.0)
 
     def test_below_min_silence_raises(self):
         with pytest.raises(ValidationError):

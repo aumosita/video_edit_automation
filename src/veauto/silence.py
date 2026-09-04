@@ -157,6 +157,157 @@ def ensure_ffmpeg_available() -> str:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Adaptive (auto) silence threshold
+# ---------------------------------------------------------------------------
+
+# Windows whose measured RMS is at or below this value are treated as
+# digital silence and still participate in the percentile math (they ARE
+# the noise floor), but they need a finite stand-in value.
+_DIGITAL_SILENCE_DB = -120.0
+
+_RMS_LINE_RE = re.compile(r"RMS_level=(-?\d+(?:\.\d+)?|-inf)")
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    """Linear-interpolated percentile of an already-sorted list."""
+    if not sorted_vals:
+        return _DIGITAL_SILENCE_DB
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = (len(sorted_vals) - 1) * (pct / 100.0)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = pos - lo
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
+
+
+def _probe_sample_rate(path: Path) -> int:
+    """Best-effort sample-rate probe via ffprobe (fallback: 48000)."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        try:
+            result = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "a:0",
+                 "-show_entries", "stream=sample_rate",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                capture_output=True, text=True, check=True,
+            )
+            return int(result.stdout.strip() or 48000)
+        except Exception:  # noqa: BLE001 — best-effort probe
+            pass
+    return 48000
+
+
+def measure_rms_profile(
+    path: Path,
+    *,
+    window_seconds: float = 1.0,
+    ffmpeg_path: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> list[float]:
+    """Measure per-window RMS levels (dBFS) of the first audio stream.
+
+    Uses ffmpeg's ``astats`` filter with ``reset=1`` on ``asetnsamples``
+    chunks, so every entry covers roughly ``window_seconds`` of audio.
+    Digital silence is reported as ``-120``. This is the raw input for
+    :func:`estimate_silence_threshold`.
+    """
+    ff = ffmpeg_path or ensure_ffmpeg_available()
+    rate = _probe_sample_rate(path)
+    n = max(1, int(rate * window_seconds))
+    cmd = [
+        ff, "-hide_banner", "-nostats",
+        "-i", str(path),
+        "-map", "0:a:0",
+        "-af",
+        (
+            f"asetnsamples=n={n}:p=0,"
+            "astats=metadata=1:reset=1,"
+            "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-"
+        ),
+        "-f", "null", "-",
+    ]
+    result = run_with_cancel(cmd, should_cancel=should_cancel)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed (rc={result.returncode}) while measuring RMS:\n"
+            f"{result.stderr.strip()}"
+        )
+    windows: list[float] = []
+    for m in _RMS_LINE_RE.finditer(result.stdout):
+        raw = m.group(1)
+        windows.append(
+            float(raw) if raw != "-inf" else _DIGITAL_SILENCE_DB
+        )
+    return windows
+
+
+def estimate_silence_threshold(
+    rms_windows: list[float],
+    *,
+    headroom_db: float = 12.0,
+    floor_gap_db: float = 10.0,
+    min_db: float = -70.0,
+    max_db: float = -20.0,
+) -> float:
+    """Derive a silence threshold from a file's loudness distribution.
+
+    The heuristic treats the loud tail of the distribution (95th
+    percentile) as "speech level" and the quiet tail (5th percentile) as
+    the "noise floor", then picks a threshold that sits ``headroom_db``
+    below the speech level while staying at least ``floor_gap_db`` above
+    the noise floor (so genuine background hiss is still counted as
+    silence). The result is clamped to ``[min_db, max_db]``.
+
+    Why this exists: a fixed ``-30 dB`` threshold misclassifies quiet
+    recordings — if the speech level is only ~-32 dB, soft spoken
+    passages fall below the threshold and get cut as "silence" while the
+    user clearly hears them.
+    """
+    if not rms_windows:
+        return -30.0
+    vals = sorted(rms_windows)
+    speech_db = _percentile(vals, 95)
+    floor_db = _percentile(vals, 5)
+    threshold = speech_db - headroom_db
+    # Never bury the noise floor inside "voice": keep some gap above it
+    # so background hiss remains classified as silence.
+    threshold = max(threshold, floor_db + floor_gap_db)
+    return min(max(threshold, min_db), max_db)
+
+
+def resolve_noise_db(
+    path: Path,
+    config: SilenceConfig,
+    *,
+    ffmpeg_path: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> float:
+    """Return the effective silence threshold for ``config``.
+
+    With ``config.auto_noise_db`` off this is simply ``config.noise_db``.
+    With it on, the file's loudness profile is measured once and the
+    threshold is derived via :func:`estimate_silence_threshold`.
+    """
+    if not config.auto_noise_db:
+        return config.noise_db
+    windows = measure_rms_profile(
+        path,
+        ffmpeg_path=ffmpeg_path,
+        should_cancel=should_cancel,
+    )
+    resolved = estimate_silence_threshold(
+        windows, headroom_db=config.noise_headroom_db,
+    )
+    # Apply the user's relative adjustment, then re-clamp to the same
+    # bounds ``estimate_silence_threshold`` uses so the offset can never
+    # push the threshold into nonsense territory.
+    return min(
+        max(resolved + config.noise_db_offset, -70.0), -20.0,
+    )
+
+
 def _probe_with_ffmpeg(ffmpeg_path: str, path: Path) -> float:
     """Read the total duration by decoding the container header with ffmpeg."""
     result = subprocess.run(
@@ -302,10 +453,13 @@ def detect_silence(
         ``lambda: cancel_event.is_set()`` from the web worker.
     """
     ffmpeg = ffmpeg_path or ensure_ffmpeg_available()
+    noise_db = resolve_noise_db(
+        path, config, ffmpeg_path=ffmpeg, should_cancel=should_cancel,
+    )
     intervals, _ = _run_silencedetect(
         ffmpeg,
         path,
-        noise_db=config.noise_db,
+        noise_db=noise_db,
         min_silence=config.min_silence,
         audio_stream=audio_stream,
         should_cancel=should_cancel,
@@ -357,42 +511,48 @@ def snap_to_voice(
     t: float,
     voice_ranges: list[VoiceRange],
     *,
-    snap_window: float = 0.7,
+    snap_window: float = 0.5,
+    kind: str = "start",
 ) -> float:
-    """Snap a single timestamp onto the nearest voice range.
+    """Snap a single timestamp onto a voice-range edge.
 
     Rules
     -----
-    1. If ``t`` is already inside a voice range, return it
-       unchanged.
-    2. If ``t`` is within ``snap_window`` of a voice edge, snap
-       to the edge.
-    3. Otherwise return ``t`` unchanged — we never pull a
-       subtitle arbitrarily far from its STT time, since that
-       would mask real timing errors rather than fix drift.
+    1. If ``t`` is already inside a voice range, return it unchanged.
+    2. ``kind="start"`` (a subtitle onset): snap **forward** onto the
+       next voice range's ``source_in`` if it is within
+       ``snap_window``. faster-whisper fires word starts 100-500 ms
+       *before* the true audio energy rises, so the correction is
+       always forward — we never pull an onset backwards onto the
+       previous utterance's tail (that would overlap the previous
+       caption or desync it further).
+    3. ``kind="end"`` (a subtitle offset): snap **backward** onto the
+       previous voice range's ``source_out`` if within the window.
+    4. Otherwise return ``t`` unchanged — we never pull a subtitle
+       arbitrarily far from its STT time, since that would mask real
+       timing errors rather than fix drift.
 
-    Why ``snap_window=0.7``
-    ------------------------
-    faster-whisper's word-level timestamps systematically fire
-    *before* the true audio onset — usually by 100-300 ms, but
-    sometimes up to 500 ms. The 0.4 s window we used previously
-    wasn't generous enough to absorb that drift on the worst
-    clips; 0.7 s reliably catches the early-firing cases while
-    still rejecting genuine STT errors (which are usually > 1 s
-    away from a real onset).
+    Parameters
+    ----------
+    kind:
+        ``"start"`` for subtitle onsets, ``"end"`` for offsets.
     """
     if not voice_ranges:
         return t
+    for vr in voice_ranges:
+        if vr.source_in - 1e-6 <= t <= vr.source_out + 1e-6:
+            return t
     best = t
     best_dist = float("inf")
     for vr in voice_ranges:
-        for edge in (vr.source_in, vr.source_out):
-            d = abs(t - edge)
-            if d < best_dist:
-                best_dist = d
-                best = edge
-        if vr.source_in - 1e-6 <= t <= vr.source_out + 1e-6:
-            return t
+        edge = vr.source_in if kind == "start" else vr.source_out
+        forward_ok = edge >= t if kind == "start" else edge <= t
+        if not forward_ok:
+            continue
+        d = abs(t - edge)
+        if d < best_dist:
+            best_dist = d
+            best = edge
     if best_dist <= snap_window:
         return best
     return t
@@ -403,9 +563,14 @@ def shift_subtitle_timestamps(
     subtitles,
     voice_ranges,
     *,
-    snap_window: float = 0.7,
+    snap_window: float = 0.5,
 ) -> int:
     """Apply :func:`snap_to_voice` to every subtitle in place.
+
+    Starts snap forward onto voice onsets, ends snap backward onto
+    voice offsets (see :func:`snap_to_voice`). A minimum gap of
+    0.05 s between ``start`` and ``end`` is enforced after snapping
+    so a subtitle never inverts or vanishes.
 
     Returns the number of subtitles whose timestamps were
     adjusted. Designed as a single convenience for the pipeline
@@ -414,9 +579,13 @@ def shift_subtitle_timestamps(
     n = 0
     for sub in subtitles:
         new_start = snap_to_voice(sub.start, voice_ranges,
-                                  snap_window=snap_window)
+                                  snap_window=snap_window, kind="start")
         new_end = snap_to_voice(sub.end, voice_ranges,
-                                snap_window=snap_window)
+                                snap_window=snap_window, kind="end")
+        if new_end < new_start + 0.05:
+            # A backward end-snap that would invert the cue (or make it
+            # vanishingly short) is rejected — keep the original end.
+            new_end = max(sub.end, new_start + 0.05)
         if new_start != sub.start or new_end != sub.end:
             sub.start = new_start
             sub.end = new_end

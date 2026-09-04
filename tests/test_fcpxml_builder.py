@@ -42,6 +42,106 @@ def test_rational_time_clamps_negative() -> None:
     assert _rational_time(-1.0, 30.0) == "0/30s"
 
 
+def test_no_effect_dependency_for_captions():
+    """Titles reference the **Basic Title** template — the only Apple
+    title template with no built-in fade — so subtitles pop on/off
+    exactly at their audio times (no fade), unlike "Text"/"Lower Third
+    Text" which ship with a built-in Fade build-in.
+    """
+    media = _make_media()
+    cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+    subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
+    xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
+    root = ET.fromstring(xml)
+    effect = root.find('resources/effect[@id="r3"]')
+    assert effect is not None
+    assert effect.get("name") == "Basic Title"
+    assert effect.get("uid", "").endswith(
+        "Bumper:Opener.localized/Basic Title.localized/Basic Title.moti"
+    )
+
+
+def test_title_position_param_uses_fcp_real_key():
+    """FCP ignores simple param keys; the Position override must use
+    FCP's real hierarchical key (taken from a genuine FCP subtitle
+    export). Bottom placement on 1080p → Y ≈ -300.
+    """
+    media = _make_media()
+    cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+    subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
+    xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
+    root = ET.fromstring(xml)
+    title = root.find(".//spine/asset-clip/title")
+    param = title.find("param[@name='Position']")
+    assert param is not None
+    assert param.get("key") == "9999/999166631/999166633/1/100/101"
+    assert param.get("value") == "0 -300"
+    # DTD content model: params precede <text>.
+    children = [c.tag for c in title]
+    assert children.index("param") < children.index("text")
+
+
+
+
+
+def _validate_against_fcp_dtd(xml: str) -> None:
+    """Validate ``xml`` against Final Cut Pro's own FCPXMLv1_10.dtd.
+
+    Skipped when FCP is not installed (DTD not found). A failure here
+    means FCP will reject the import with "DTD validation failed".
+    """
+    import glob
+
+    from lxml import etree as LET
+
+    candidates = glob.glob(
+        "/Applications/Final Cut Pro.app/Contents/Frameworks/"
+        "Interchange.framework/Versions/A/Resources/FCPXMLv1_10.dtd"
+    )
+    if not candidates:
+        import pytest
+
+        pytest.skip("Final Cut Pro DTD not found")
+    dtd = LET.DTD(open(candidates[0], "rb"))
+    parser = LET.XMLParser(dtd_validation=False)
+    doc = LET.fromstring(xml.encode("utf-8"), parser)
+    assert dtd.validate(doc), str(dtd.error_log)
+
+
+def test_build_fcpxml_with_subtitles_validates_against_fcp_dtd() -> None:
+    media = _make_media()
+    cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+    subs = [
+        SubtitleSegment(start=0.5, end=2.0, text="Hello"),
+        SubtitleSegment(start=3.0, end=5.0, text="World"),
+    ]
+    xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
+    _validate_against_fcp_dtd(xml)
+
+
+def test_rational_time_ntsc_uses_exact_timebase() -> None:
+    """29.97 fps must be represented on the 1001-based timebase.
+
+    The naive ``round(t * 29.97) / 30s`` representation accumulates a
+    0.1 % error — ~0.6 s over ten minutes — which desynchronises the
+    titles from the audio.
+    """
+    # One frame at 29.97 fps = 1001/30000 s.
+    assert _rational_time(1001 / 30000, 29.97) == "1001/30000s"
+    # 10 seconds = 299.7 frames → 300 frames = 300300/30000 s.
+    assert _rational_time(10.0, 29.97) == "300300/30000s"
+
+
+def test_rational_time_ntsc_23976() -> None:
+    assert _rational_time(1001 / 24000, 23.976) == "1001/24000s"
+
+
+def test_frame_duration_ntsc() -> None:
+    from veauto.fcpxml_builder import _frame_duration
+    assert _frame_duration(29.97) == "1001/30000s"
+    assert _frame_duration(30.0) == "1/30s"
+
+
 def test_assign_subtitles_basic():
     cuts = [CutSegment(source_in=0.0, source_out=5.0), CutSegment(source_in=6.0, source_out=10.0)]
     subs = [
@@ -107,14 +207,21 @@ def test_build_fcpxml_with_subtitles():
     ]
     xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
     root = ET.fromstring(xml)
-    # No <text-style-def> is emitted (style is inlined per <title>).
-    assert root.findall(".//text-style-def") == []
+    # DTD-exact shape: inline <text-style ref="cN"> (text is the
+    # caption) + one <text-style-def id="cN"> per caption.
+    assert len(root.findall(".//text-style-def")) == 2
     titles = root.findall(".//spine/asset-clip/title")
     assert len(titles) == 2
     texts = [t.find("text/text-style").text for t in titles]
     assert texts == ["Hello", "World"]
+    for t in titles:
+        style_ref = t.find("text/text-style").get("ref")
+        assert style_ref
+        tsd = t.find(f"text-style-def[@id='{style_ref}']")
+        assert tsd is not None
     assert titles[0].get("offset") == "15/30s"
     assert titles[0].get("lane") == "1"
+
 
 
 def test_build_fcpxml_subtitle_clipped_to_cut():
@@ -128,10 +235,84 @@ def test_build_fcpxml_subtitle_clipped_to_cut():
     root = ET.fromstring(xml)
     titles = root.findall(".//spine/asset-clip/title")
     assert len(titles) == 1
-    assert titles[0].get("offset") == "0/30s"
+    # Clipped to the cut's head → clip-local origin == cut.source_in.
+    assert titles[0].get("offset") == "60/30s"
     # sub_dur (3.0s) is capped at remaining cut (5.0 - 2.0 = 3.0s)
     # → 3.0s = 90 frames at 30 fps.
     assert titles[0].get("duration") == "90/30s"
+
+
+def test_build_fcpxml_caption_offsets_are_in_parent_time():
+    """An anchored item's ``offset`` lives in its **parent's** time
+    coordinate system, which for a title attached to an ``asset-clip``
+    is the clip's *source* timeline — i.e. the origin is the clip's
+    ``start`` value, not 0 and not the clip's sequence ``offset``.
+
+    Regression for the long-standing desync: emitting the compacted
+    *sequence* position instead drifted every caption by the amount of
+    silence removed so far (−90 s by the end of a real 6-minute edit).
+    """
+    media = _make_media()
+    cuts = [
+        CutSegment(source_in=0.0, source_out=10.0),
+        CutSegment(source_in=20.0, source_out=30.0),
+    ]
+    subs = [
+        SubtitleSegment(start=1.0, end=2.0, text="first-cut"),
+        SubtitleSegment(start=21.0, end=22.0, text="second-cut"),
+    ]
+    xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
+    root = ET.fromstring(xml)
+    clips = root.findall(".//spine/asset-clip")
+    # Clip 1: start=0 → offset == source time 1.0s.
+    assert clips[0].get("start") == "0/30s"
+    assert clips[0].find("title").get("offset") == "30/30s"
+    # Clip 2: start=20s (=600 frames), caption at source 21.0s.
+    # Parent-relative offset is 21.0s = 630 frames, NOT the compacted
+    # sequence position 11.0s (=330 frames).
+    assert clips[1].get("start") == "600/30s"
+    assert clips[1].find("title").get("offset") == "630/30s"
+    assert clips[1].find("title").get("duration") == "30/30s"
+
+
+def test_caption_offsets_stay_inside_their_parent_clip():
+    """Every title's offset must fall within its parent clip's source
+    range ``[start, start + duration]``.
+
+    This is the invariant the old absolute-sequence-position code
+    violated: from the second clip onward the title offsets pointed at
+    source times *before* the clip's own ``start``, so FCP snapped /
+    mismatched them and every caption showed the wrong line.
+    """
+    media = _make_media()
+    # Three cuts with a large, growing amount of removed silence — the
+    # shape that made the drift obvious on real footage.
+    cuts = [
+        CutSegment(source_in=0.0, source_out=5.0),
+        CutSegment(source_in=30.0, source_out=35.0),
+        CutSegment(source_in=90.0, source_out=95.0),
+    ]
+    subs = [
+        SubtitleSegment(start=1.0, end=2.0, text="a"),
+        SubtitleSegment(start=31.0, end=32.0, text="b"),
+        SubtitleSegment(start=91.0, end=92.0, text="c"),
+    ]
+    xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
+    root = ET.fromstring(xml)
+
+    def frames(value):
+        num, den = value.rstrip("s").split("/")
+        return int(num) / int(den)
+
+    for clip in root.findall(".//spine/asset-clip"):
+        start = frames(clip.get("start"))
+        end = start + frames(clip.get("duration"))
+        for title in clip.findall("title"):
+            off = frames(title.get("offset"))
+            assert start <= off <= end, (
+                f"title offset {off}s escapes its parent clip's source "
+                f"range [{start}, {end}] — captions will desync"
+            )
 
 
 def test_build_fcpxml_xml_is_valid_utf8():
@@ -186,18 +367,21 @@ class TestFcpDtdCompat:
                 f"{sorted(_FCPXML_RESOURCES_CHILDREN)}"
             )
 
-    def test_no_text_style_def_in_document(self):
+    def test_no_text_style_def_outside_titles(self):
         """The FCPXML 1.10 DTD only allows ``<text-style-def>`` inside
-        a ``<title>`` (not under ``<project>`` or ``<resources>``).
-        We avoid the complexity by inlining the style into every
-        ``<title>`` instead.
+        a ``<caption>`` (not under ``<project>`` or ``<resources>``).
+        We emit the canonical Apple shape: one def per title.
         """
         media = _make_media()
         cuts = [CutSegment(source_in=0.0, source_out=10.0)]
         subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
         xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
         root = ET.fromstring(xml)
-        assert root.find(".//text-style-def") is None
+        parent_map = {c: p for p in root.iter() for c in p}
+        tsds = list(root.iter("text-style-def"))
+        assert tsds, "expected at least one <text-style-def> inside a <title>"
+        for tsd in tsds:
+            assert parent_map[tsd].tag == "title"
 
     def test_text_style_has_no_motion_only_attrs(self):
         media = _make_media()
@@ -205,7 +389,7 @@ class TestFcpDtdCompat:
         subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
         xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=SubtitleStyle())
         root = ET.fromstring(xml)
-        ts = root.find(".//spine/asset-clip/title/text/text-style")
+        ts = root.find(".//spine/asset-clip/title/text-style-def/text-style")
         assert ts is not None
         for attr in ts.attrib:
             assert attr in _FCPXML_TEXT_STYLE_ATTRS, (
@@ -218,8 +402,8 @@ class TestFcpDtdCompat:
         assert "horizontalAnchor" not in ts.attrib
 
     def test_style_is_inlined_per_title(self):
-        """Without a ``<text-style-def>``, the style must be inlined
-        into every title so the file is self-contained.
+        """Each caption carries its own ``<text-style-def>`` so the file
+        is self-contained.
         """
         media = _make_media()
         cuts = [CutSegment(source_in=0.0, source_out=10.0)]
@@ -233,15 +417,41 @@ class TestFcpDtdCompat:
         titles = root.findall(".//spine/asset-clip/title")
         assert len(titles) == 2
         for t in titles:
-            ts = t.find("text/text-style")
+            ts = t.find("text-style-def/text-style")
             assert ts is not None
             assert ts.get("font") == "Arial"
             assert ts.get("fontSize") == "64"
 
+    def test_stroke_width_is_negative_for_an_outside_outline(self):
+        """In FCP/Motion the *sign* of ``strokeWidth`` picks the stroke's
+        side: negative draws it **outside** the glyph, positive draws it
+        **inside**, over the glyph's own fill.
+
+        Emitting the raw positive width made a 3.5 pt black stroke eat
+        the stems of 56 pt Apple SD Gothic Neo Bold, so captions
+        rendered as black text with a thin white sliver.
+        """
+        media = _make_media()
+        cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+        subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
+        style = SubtitleStyle(outline_width=3.5)
+        xml = build_fcpxml(media, cuts, subtitles=subs, subtitle_style=style)
+        root = ET.fromstring(xml)
+        for ts in root.iter("text-style"):
+            width = ts.get("strokeWidth")
+            if width is None:
+                continue
+            assert float(width) == -3.5, (
+                "strokeWidth must be negative so the outline is drawn "
+                "outside the glyph; a positive value paints over the "
+                "text fill and the captions look black"
+            )
+        # The user-facing knob stays a positive thickness.
+        assert style.outline_width == 3.5
+
     def test_title_has_no_position_attribute(self):
-        """The DTD does not declare ``position`` on ``<title>`` —
-        it is a Motion-only extension. We rely on FCP's default
-        placement (lower third) instead.
+        """The DTD has no ``position`` attribute on ``<title>`` —
+        vertical placement goes through the ``Position`` <param>.
         """
         media = _make_media()
         cuts = [CutSegment(source_in=0.0, source_out=10.0)]
@@ -252,12 +462,14 @@ class TestFcpDtdCompat:
         title = root.find(".//spine/asset-clip/title")
         assert title is not None
         assert title.get("position") is None
+        # Top placement -> positive Y offset.
+        param = title.find("param[@name='Position']")
+        assert param.get("value") == "0 300"
 
     def test_title_has_only_dtd_declared_attrs(self):
-        """The ``<title>`` element must only carry attributes that
-        Apple's FCPXML 1.10 DTD declares. Currently: ``name``,
-        ``lane``, ``offset``, ``start``, ``duration``, ``enabled``,
-        ``ref``, ``role``.
+        """The ``<title>`` element must only carry attributes the DTD
+        declares: name, lane, offset, start, duration, enabled, ref,
+        role.
         """
         ALLOWED = {"name", "lane", "offset", "start", "duration",
                    "enabled", "ref", "role"}
@@ -303,15 +515,17 @@ def test_build_fcpxml_no_cuts():
 class TestFcpTitleRef:
     """The DTD declares ``<title ref IDREF #REQUIRED>``. Each
     ``<title>`` we emit must reference the stub ``<effect>`` in
-    ``<resources>``.
+    ``<resources>``, and that effect must be the fade-free Basic
+    Title template.
     """
 
     def test_every_title_has_ref_attribute(self):
         media = _make_media()
-        cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+        cuts = [CutSegment(source_in=0.0, source_out=5.0),
+                CutSegment(source_in=6.0, source_out=10.0)]
         subs = [
             SubtitleSegment(start=1.0, end=2.0, text="first"),
-            SubtitleSegment(start=3.0, end=4.0, text="second"),
+            SubtitleSegment(start=7.0, end=8.0, text="second"),
         ]
         xml = build_fcpxml(media, cuts, subtitles=subs,
                            subtitle_style=SubtitleStyle())
@@ -321,7 +535,7 @@ class TestFcpTitleRef:
         for t in titles:
             assert t.get("ref") == "r3"
 
-    def test_ref_resolves_to_a_real_effect(self):
+    def test_ref_resolves_to_basic_title_effect(self):
         media = _make_media()
         cuts = [CutSegment(source_in=0.0, source_out=10.0)]
         subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
@@ -330,11 +544,10 @@ class TestFcpTitleRef:
         root = ET.fromstring(xml)
         title_ref = root.find(".//spine/asset-clip/title").get("ref")
         effect = root.find(f'resources/effect[@id="{title_ref}"]')
-        assert effect is not None, (
-            f"title ref={title_ref!r} does not point to a real <effect>"
-        )
-        # The DTD also requires ``uid`` on every <effect>.
+        assert effect is not None
         assert effect.get("uid") is not None
+        # Fade-free template only.
+        assert "Basic Title" in effect.get("uid")
 
 
 class TestFcpFormatId:
@@ -395,38 +608,7 @@ class TestFcpFormatId:
                 f"<sequence> must carry {attr!r} for FCP strict import"
             )
 
-    def test_effect_uid_uses_apple_pattern(self):
-        """The effect must use a ``…/Titles.localized/…/…moti``
-        uid so Final Cut Pro recognises it as a built-in title.
-        Earlier we emitted ``.../veauto.Subtitle.built-in`` which FCP
-        rejected as "item could not be read". We also tried the
-        ``Centered`` Build In/Out effect (transition, no text) and
-        ``Basic Title`` (text rendered too small and centred).
-        We now use ``Lower Third Text``, which FCP ships in
-        ``Final Cut Pro.app/.../METemplates.localized/Titles.localized/
-        Basic Text.localized/Lower Third Text.localized/Lower Third
-        Text.moti`` — its default style is a single large line of
-        white text on a dark bar in the lower third, which is
-        what most users mean by a "YouTube-style caption".
-        """
-        media = _make_media()
-        cuts = [CutSegment(source_in=0.0, source_out=10.0)]
-        subs = [SubtitleSegment(start=1.0, end=2.0, text="hi")]
-        xml = build_fcpxml(media, cuts, subtitles=subs,
-                           subtitle_style=SubtitleStyle())
-        root = ET.fromstring(xml)
-        effect = root.find('resources/effect[@id="r3"]')
-        assert effect is not None
-        uid = effect.get("uid", "")
-        assert uid.startswith(".../Titles.localized/"), (
-            f"effect uid should follow Apple's .../Titles.localized/... pattern; "
-            f"got {uid!r}"
-        )
-        assert "Lower Third Text" in uid, (
-            f"effect uid should reference the 'Lower Third Text' template "
-            f"so FCP renders a YouTube-style caption; got {uid!r}"
-        )
-        assert uid.endswith(".moti")
+
 
 
 class TestRemapCutsToCompactedTimeline:

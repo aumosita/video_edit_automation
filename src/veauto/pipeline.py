@@ -199,7 +199,7 @@ def run_pipeline(
 
     # 2. Subtitle generation
     audio_path: Path | None = None
-    if config.subtitle.enabled:
+    if config.subtitle.stt_enabled:
         if not result.media.has_audio:
             logger.warning("Source has no audio; skipping subtitle generation")
         else:
@@ -247,11 +247,19 @@ def run_pipeline(
                     detect_voice_ranges,
                     shift_subtitle_timestamps,
                 )
+                # Use a *finer* min-silence than the cutting stage so
+                # voice ranges split at short pauses too. With the
+                # cutting-stage 1.5 s threshold the ranges are coarse
+                # blobs and the snap step below can only correct gross
+                # errors; 0.5 s gives it word-gap resolution.
                 voice = detect_voice_ranges(
                     input_path,
                     SilenceConfig(
                         noise_db=config.silence.noise_db,
-                        min_silence=config.silence.min_silence,
+                        auto_noise_db=config.silence.auto_noise_db,
+                        noise_headroom_db=config.silence.noise_headroom_db,
+                        noise_db_offset=config.silence.noise_db_offset,
+                        min_silence=min(config.silence.min_silence, 0.5),
                         enabled=True,
                     ),
                     total_duration=result.media.duration,
@@ -273,11 +281,19 @@ def run_pipeline(
     # source_in / source_out vs subtitle.start / subtitle.end).
     # The remap for the report runs *after* this so the report
     # shows the user-facing compacted timeline.
+    #
+    # `target="srt"` keeps the SRT but drops subtitles from the
+    # FCPXML; `target="none"` runs no STT so there are none anyway.
+    fcpxml_subs = (
+        result.subtitles
+        if (result.subtitles and config.subtitle.in_fcpxml)
+        else None
+    )
     result.fcpxml = build_fcpxml(
         result.media,
         result.cuts,
-        subtitles=result.subtitles or None,
-        subtitle_style=config.subtitle.style if result.subtitles else None,
+        subtitles=fcpxml_subs,
+        subtitle_style=config.subtitle.style if fcpxml_subs else None,
         project_name=config.output.project_name,
         event_name=config.output.event_name,
     )

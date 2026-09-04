@@ -285,3 +285,85 @@ class TestRunWithReport:
         assert default_path.exists(), f"expected {default_path}"
         assert "Wrote report" in result.stdout
 
+        assert "Wrote report" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# --subtitle-target: 4-way subtitle control
+# ---------------------------------------------------------------------------
+
+WORDS = [
+    Word(start=0.0, end=0.4, text="hello"),
+    Word(start=0.5, end=0.9, text="world"),
+]
+
+runner = CliRunner()
+
+
+class TestSubtitleTarget:
+    """`--subtitle-target` controls whether STT runs and whether the
+    resulting subtitles are baked into the FCPXML.
+    """
+
+    def _run(self, monkeypatch, tmp_path, extra_args):
+        _stub_probe(monkeypatch, duration=5.0)
+        _stub_silence(monkeypatch)
+        _stub_extract_audio(monkeypatch, tmp_path)
+        _stub_transcriber(monkeypatch, WORDS)
+        out = tmp_path / "out.fcpxml"
+        result = runner.invoke(
+            app,
+            ["run", str(_write_input(tmp_path)), "-o", str(out), *extra_args],
+        )
+        return result, out
+
+    def test_default_target_both_embeds_subtitles(self, monkeypatch, tmp_path):
+        result, out = self._run(monkeypatch, tmp_path, [])
+        assert result.exit_code == 0, result.stdout
+        assert out.exists()
+        # Subtitles present in the FCPXML.
+        assert "<title" in out.read_text(encoding="utf-8")
+
+    def test_target_srt_keeps_words_but_omits_titles(self, monkeypatch, tmp_path):
+        """STT runs, words are recorded, but no <title> elements end up
+        in the FCPXML."""
+        result, out = self._run(
+            monkeypatch, tmp_path, ["--subtitle-target", "srt"]
+        )
+        assert result.exit_code == 0, result.stdout
+        assert out.exists()
+        xml = out.read_text(encoding="utf-8")
+        assert "<title" not in xml
+
+    def test_target_none_skips_everything(self, monkeypatch, tmp_path):
+        result, out = self._run(
+            monkeypatch, tmp_path, ["--subtitle-target", "none"]
+        )
+        assert result.exit_code == 0, result.stdout
+        assert out.exists()
+        assert "<title" not in out.read_text(encoding="utf-8")
+
+    def test_legacy_no_subtitles_still_works(self, monkeypatch, tmp_path):
+        """`--no-subtitles` keeps its old meaning (skip everything)."""
+        result, out = self._run(monkeypatch, tmp_path, ["--no-subtitles"])
+        assert result.exit_code == 0, result.stdout
+        assert "<title" not in out.read_text(encoding="utf-8")
+
+    def test_legacy_no_subtitles_overrides_target(self, monkeypatch, tmp_path):
+        """--no-subtitles beats --subtitle-target (legacy wins)."""
+        result, out = self._run(
+            monkeypatch, tmp_path,
+            ["--no-subtitles", "--subtitle-target", "both"],
+        )
+        assert result.exit_code == 0, result.stdout
+        assert "<title" not in out.read_text(encoding="utf-8")
+
+    def test_invalid_target_rejected(self, tmp_path):
+        result = runner.invoke(
+            app,
+            ["run", str(_write_input(tmp_path)),
+             "-o", str(tmp_path / "out.fcpxml"),
+             "--subtitle-target", "bogus"],
+        )
+        assert result.exit_code != 0
+

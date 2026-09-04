@@ -119,6 +119,17 @@ class SubtitleStyle(BaseModel):
     """Visual style applied to all generated subtitle titles."""
 
     position: SubtitlePosition = "bottom"
+    # FCP title template used for the captions. ``text`` is the plain
+    # static "Basic Text > Text" template — no built-in animation.
+    # ``lower_third`` is Apple's "Lower Third Text", which has a
+    # built-in fade-in/out animation.
+    template: Literal["text", "lower_third"] = Field(
+        default="text",
+        description=(
+            "'text' = static title with no fade (default). "
+            "'lower_third' = Apple's animated Lower Third Text."
+        ),
+    )
     offset_y: int = Field(
         default=0,
         description=(
@@ -147,13 +158,31 @@ class SubtitleStyle(BaseModel):
         The legacy ``relativeTo`` / ``verticalAnchor`` / ``horizontalAnchor``
         (Motion-only) attributes are NOT included because they trip
         Final Cut Pro's DTD validation on import.
+
+        ``strokeWidth`` sign convention
+        -------------------------------
+        In Final Cut Pro / Motion the sign of ``strokeWidth`` selects
+        *where* the stroke is drawn:
+
+        * **negative** → stroke grows **outward** from the glyph edge
+          (what a subtitle outline is meant to be), and
+        * **positive** → stroke grows **inward**, painting over the
+          glyph's own fill.
+
+        We used to emit the raw positive width, so a 3.5 pt black
+        stroke ate most of the stem of 56 pt Apple SD Gothic Neo Bold
+        and the captions rendered as **black text with a thin white
+        sliver** instead of white text with a black outline.
+
+        ``outline_width`` therefore stays a positive, user-facing
+        thickness and is negated here.
         """
         attrs: dict[str, str] = {
             "font": self.font,
             "fontSize": str(self.font_size),
             "fontColor": self.color,
             "strokeColor": self.outline_color,
-            "strokeWidth": str(self.outline_width),
+            "strokeWidth": str(-abs(self.outline_width)),
             "shadowColor": self.shadow_color,
             "shadowOffset": f"{self.shadow_offset[0]} {self.shadow_offset[1]}",
             "shadowBlurRadius": str(self.shadow_blur),
@@ -170,6 +199,33 @@ class SilenceConfig(BaseModel):
     """Configuration for silence detection / removal."""
 
     noise_db: float = Field(default=-30.0, description="Silence threshold in dB (e.g. -30)")
+    auto_noise_db: bool = Field(
+        default=False,
+        description=(
+            "Derive the silence threshold from the file's own loudness "
+            "profile instead of the fixed noise_db. Recommended for quiet "
+            "recordings whose speech level sits close to the fixed threshold."
+        ),
+    )
+    noise_headroom_db: float = Field(
+        default=12.0,
+        ge=1.0,
+        le=40.0,
+        description=(
+            "When auto_noise_db is on: gap kept below the measured speech "
+            "level. Larger = more aggressive silence cuts."
+        ),
+    )
+    noise_db_offset: float = Field(
+        default=0.0,
+        ge=-30.0,
+        le=30.0,
+        description=(
+            "Relative adjustment (dB) applied to the resolved threshold. "
+            "Only used when auto_noise_db is on: negative keeps more audio "
+            "(less aggressive), positive cuts more aggressively."
+        ),
+    )
     min_silence: float = Field(default=1.5, ge=0.1, description="Minimum silence length to cut (s)")
     margin: float = Field(default=0.3, ge=0.0, description="Padding kept on each side of cut (s)")
     min_keep_seconds: float = Field(
@@ -185,8 +241,31 @@ class SilenceConfig(BaseModel):
 
 
 class SubtitleConfig(BaseModel):
-    """Configuration for STT and subtitle generation."""
+    """Configuration for STT and subtitle generation.
 
+    The ``target`` field picks where the resulting subtitles end up:
+
+    * ``"srt"``     – STT runs, SRT is produced, FCPXML stays caption-free.
+    * ``"fcpxml"``  – STT is skipped, but the user can still author a
+      subtitle ``.srt`` themselves and bake it into FCPXML via a
+      downstream step.  (Not currently exposed; reserved.)
+    * ``"both"``    – STT runs and the SRT is also embedded in the
+      FCPXML.  Default.
+    * ``"none"``    – STT is skipped and FCPXML has no captions.  Same
+      as the legacy ``--no-subtitles`` flag.
+
+    The ``enabled`` flag is kept for backwards-compat / external code:
+    it is treated as the STT gate (``target != "none"``).
+    """
+
+    target: Literal["srt", "fcpxml", "both", "none"] = Field(
+        default="both",
+        description=(
+            "Where to put subtitles. 'srt' = SRT only, 'fcpxml' = "
+            "reserved (FCPXML only, no STT), 'both' = SRT + FCPXML, "
+            "'none' = skip everything."
+        ),
+    )
     enabled: bool = True
     model: Literal["tiny", "base", "small", "medium", "large-v3", "distil-large-v3"] = "medium"
     language: str | None = Field(
@@ -210,6 +289,34 @@ class SubtitleConfig(BaseModel):
         ),
     )
     style: SubtitleStyle = Field(default_factory=SubtitleStyle)
+
+    # ------------------------------------------------------------------
+    # Derived helpers
+    # ------------------------------------------------------------------
+    @property
+    def stt_enabled(self) -> bool:
+        """Run STT at all.
+
+        Honoured when **either** ``target`` is explicitly "none" (the
+        modern "skip everything" signal) or the legacy ``enabled`` flag
+        is False.  When the caller sets ``target`` to a non-"none" value
+        and leaves ``enabled`` alone, ``target`` wins.
+        """
+        if self.target == "none":
+            return False
+        return self.enabled
+
+    @property
+    def in_fcpxml(self) -> bool:
+        """Whether generated subtitles are baked into the FCPXML.
+
+        Requires STT to have run (``stt_enabled``) — you can't bake
+        captions that don't exist.  Also requires ``target`` to opt in
+        to the FCPXML side (``fcpxml`` or ``both``).
+        """
+        if not self.stt_enabled:
+            return False
+        return self.target in ("fcpxml", "both")
 
 
 class OutputConfig(BaseModel):
