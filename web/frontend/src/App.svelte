@@ -139,7 +139,12 @@
   }
 
   async function onCancel(id) {
-    try { await cancelJob(id); } catch (e) { console.error("cancel failed:", e); }
+    // Cancel keeps the record (status -> cancelled) and kills any ffmpeg
+    // child, so refresh afterwards to show the updated status.
+    try {
+      await cancelJob(id);
+      await refresh();
+    } catch (e) { console.error("cancel failed:", e); }
   }
 
   async function onDelete(id) {

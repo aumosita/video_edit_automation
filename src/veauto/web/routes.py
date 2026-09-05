@@ -113,15 +113,30 @@ async def clear_jobs() -> dict:
     return {"deleted": removed}
 
 
-@router.delete("/jobs/{job_id}", status_code=204)
-async def cancel_job(job_id: str) -> None:
-    """Cancel a running job and remove it from the manager.
+@router.post("/jobs/{job_id}/cancel", status_code=200)
+async def cancel_job(job_id: str) -> dict:
+    """Cancel a running job, **keeping** its record.
 
-    A single DELETE call covers both operations: the worker thread is
-    signalled to stop (``cancel_event.set``) and the job is popped from
-    the in-memory map so subsequent ``GET /api/jobs`` calls won't
-    resurrect it. The endpoint is idempotent — calling DELETE on an
-    unknown id returns 204.
+    Distinct from ``DELETE /api/jobs/{id}``, which removes the record
+    entirely. Cancelling sets the job's cancel event and terminates any
+    ffmpeg child process it spawned (so a long call doesn't have to
+    finish first), leaving the row visible with status ``cancelled``.
+    """
+    mgr = _manager()
+    ok = mgr.cancel(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    return {"cancelled": True}
+
+
+@router.delete("/jobs/{job_id}", status_code=204)
+async def delete_job(job_id: str) -> None:
+    """Delete a job: remove its record and stop its work.
+
+    The worker is cancelled and any child process killed, then the
+    record is dropped from the manager and the on-disk index. This is
+    the only endpoint that removes a job from the table. Idempotent —
+    deleting an unknown id returns 204.
     """
     mgr = _manager()
     mgr.delete(job_id)  # idempotent: returns False if already gone

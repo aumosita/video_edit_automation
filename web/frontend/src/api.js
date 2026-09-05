@@ -28,7 +28,8 @@ export const api = {
   health: () => request("/api/health"),
   listJobs: () => request("/api/jobs"),
   getJob: (id) => request(`/api/jobs/${id}`),
-  cancelJob: (id) => request(`/api/jobs/${id}`, { method: "DELETE" }),
+  // Cancel keeps the record (status -> cancelled); delete removes it.
+  cancelJob: (id) => request(`/api/jobs/${id}/cancel`, { method: "POST" }),
   deleteJob: (id) => request(`/api/jobs/${id}`, { method: "DELETE" }),
   clearJobs: () => request("/api/jobs", { method: "DELETE" }),
   defaultOptions: () => request("/api/config/defaults"),

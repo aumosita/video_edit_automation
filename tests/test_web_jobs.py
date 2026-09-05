@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -185,6 +187,99 @@ class TestJobLifecycle:
         # The index is emptied too, so a restart stays empty.
         data = json.loads((tmp_path / "jobs.json").read_text(encoding="utf-8"))
         assert data["jobs"] == []
+
+    def test_deleted_job_does_not_broadcast(self, manager: JobManager, tmp_path: Path):
+        """A job that was deleted must not reappear in the UI.
+
+        The worker can still be unwinding from a long ffmpeg call after
+        the record is gone; broadcasting a ``job.update`` for it would
+        make the SPA (which upserts unknown ids) resurrect the row.
+        """
+        v = _write_dummy_video(tmp_path)
+        loop = asyncio.new_event_loop()
+        try:
+            rec = manager.submit(
+                input_path=v,
+                input_name="gone.mp4",
+                input_size=1,
+                options=JobOptions(),
+                loop=loop,
+            )
+        finally:
+            loop.close()
+
+        collected: list[dict] = []
+
+        class _FakeLoop:
+            def call_soon_threadsafe(self, fn, *args):  # noqa: ANN002
+                fn(*args)
+
+        sub = manager.subscribe_all()
+        sub.loop = _FakeLoop()  # type: ignore[assignment]
+
+        job = manager._jobs[rec.id]
+        assert manager.delete(rec.id) is True
+
+        # Late status update from the still-running worker thread.
+        manager._set_status(job, "cancelled", stage="cancelled", error="Cancelled")
+
+        # Drain the queue. The delete itself broadcasts ``job.deleted``,
+        # which is expected; what must NOT appear is a late update (or a
+        # per-job ``state`` message) for the removed job.
+        while not sub.queue.empty():
+            collected.append(sub.queue.get_nowait())
+        assert [m["type"] for m in collected] == ["job.deleted"]
+        assert manager.get(rec.id) is None
+
+    def test_cancel_keeps_record_and_marks_cancelled(
+        self, manager: JobManager, tmp_path: Path
+    ):
+        v = _write_dummy_video(tmp_path)
+        loop = asyncio.new_event_loop()
+        try:
+            rec = manager.submit(
+                input_path=v,
+                input_name="stop.mp4",
+                input_size=1,
+                options=JobOptions(),
+                loop=loop,
+            )
+        finally:
+            loop.close()
+
+        assert manager.cancel(rec.id) is True
+        job = manager._jobs.get(rec.id)
+        assert job is not None
+        # The record stays in the table (visible as cancelled) instead of
+        # silently disappearing as it did when cancel == delete.
+        _wait_for(lambda: manager.get(rec.id) is not None
+                  and manager.get(rec.id).status == "cancelled")
+
+    def test_cancel_kills_registered_child_process(
+        self, manager: JobManager, tmp_path: Path
+    ):
+        """Cancelling terminates an ffmpeg child instead of waiting."""
+        v = _write_dummy_video(tmp_path)
+        loop = asyncio.new_event_loop()
+        try:
+            rec = manager.submit(
+                input_path=v,
+                input_name="long.mp4",
+                input_size=1,
+                options=JobOptions(),
+                loop=loop,
+            )
+        finally:
+            loop.close()
+
+        job = manager._jobs[rec.id]
+        # Simulate a long ffmpeg call the worker is blocked in.
+        with manager._track_subprocess(job):
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        assert proc.poll() is None
+        manager.cancel(rec.id)
+        assert proc.poll() is not None  # terminated, not waited out
+        manager._kill_procs(job)
 
     def test_job_dir_created(self, manager: JobManager, tmp_path: Path):
         v = _write_dummy_video(tmp_path)

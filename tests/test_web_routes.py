@@ -170,6 +170,74 @@ class TestHealthAndConfig:
         assert data["noise_db"] == -30.0
 
 
+class TestCancelVersusDelete:
+    """Cancel keeps the record; delete removes it."""
+
+    def test_cancel_keeps_record(self, client: TestClient, monkeypatch):
+        # A worker that stays busy long enough for the cancel to land —
+        # the default fixture's fake job finishes instantly.
+        def slow_run(self, job):  # type: ignore[ANN001]
+            from veauto.web.jobs import JobCancelled
+
+            try:
+                for _ in range(200):
+                    self._check_cancel(job)
+                    time.sleep(0.05)
+            except JobCancelled:
+                self._set_status(
+                    job, "cancelled", stage="cancelled",
+                    error="Cancelled by user.", error_kind="cancelled",
+                )
+                return
+            self._set_status(job, "completed", stage="done", progress=1.0)
+
+        monkeypatch.setattr(jobs_mod.JobManager, "_run_job", slow_run)
+
+        r = client.post(
+            "/api/jobs",
+            params={"options": "{}"},
+            files={"file": ("cancel.mp4", io.BytesIO(b"\x00" * 256), "video/mp4")},
+        )
+        job_id = r.json()["id"]
+
+        # Wait until the worker is actually inside the loop.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if client.get(f"/api/jobs/{job_id}").json()["status"] == "running":
+                break
+            time.sleep(0.05)
+
+        r = client.post(f"/api/jobs/{job_id}/cancel")
+        assert r.status_code == 200, r.text
+        assert r.json()["cancelled"] is True
+
+        deadline = time.time() + 5.0
+        status = None
+        while time.time() < deadline:
+            status = client.get(f"/api/jobs/{job_id}").json()["status"]
+            if status == "cancelled":
+                break
+            time.sleep(0.05)
+        # The row is still there, just marked cancelled.
+        assert status == "cancelled"
+        assert job_id in [j["id"] for j in client.get("/api/jobs").json()]
+
+    def test_cancel_unknown_returns_404(self, client: TestClient):
+        r = client.post("/api/jobs/nope/cancel")
+        assert r.status_code == 404
+
+    def test_delete_removes_record(self, client: TestClient):
+        r = client.post(
+            "/api/jobs",
+            params={"options": "{}"},
+            files={"file": ("del.mp4", io.BytesIO(b"\x00" * 256), "video/mp4")},
+        )
+        job_id = r.json()["id"]
+        r = client.delete(f"/api/jobs/{job_id}")
+        assert r.status_code == 204
+        assert job_id not in [j["id"] for j in client.get("/api/jobs").json()]
+
+
 class TestJobSubmission:
     def test_upload_creates_job(self, client: TestClient, app_root: Path):
         r = client.post(

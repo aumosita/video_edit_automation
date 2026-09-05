@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import shutil
+import subprocess as _subprocess
 import threading
 import time
 import traceback as _tb
@@ -75,6 +76,13 @@ class _Job:
     subscribers: list[_Subscriber] = field(default_factory=list)
     loop: Any = None  # asyncio.AbstractEventLoop
     future: Any = None  # concurrent.futures.Future
+    # Child processes (ffmpeg) spawned while this job runs, so a cancel
+    # can terminate them instead of waiting for a long call to return.
+    procs: list = field(default_factory=list)
+    # Set by the worker when it returns, used by the watchdog thread.
+    done: threading.Event = field(default_factory=threading.Event)
+    # Wall-clock start of execution, for the hard timeout watchdog.
+    run_started: float = 0.0
 
 
 class JobManager:
@@ -96,6 +104,8 @@ class JobManager:
         *,
         max_workers: int = 2,
         on_job_done: Callable[[JobRecord], None] | None = None,
+        job_timeout: float | None = 6 * 60 * 60,
+        watchdog_interval: float = 2.0,
     ) -> None:
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -114,6 +124,14 @@ class JobManager:
         # "job.delete" events.
         self._global_subscribers: list[_Subscriber] = []
         self._on_job_done = on_job_done
+        # Hard ceiling (seconds) on a single job's execution. None = no
+        # limit. Prevents a wedged ffmpeg/whisper call from pinning a
+        # worker slot (and several CPU cores) forever.
+        self._job_timeout = job_timeout
+        self._watchdog_interval = watchdog_interval
+        # Thread-local so concurrently running jobs register their own
+        # subprocesses (the Popen patch below is process-wide).
+        self._local = threading.local()
         self._load_index()
 
     def submit(
@@ -146,6 +164,12 @@ class JobManager:
         with self._lock:
             self._jobs[job_id] = job
         self._persist()
+        # Watchdog enforces cancellation and the hard timeout even when
+        # the worker is blocked inside a long ffmpeg/whisper call.
+        threading.Thread(
+            target=self._watchdog, args=(job,), daemon=True,
+            name=f"veauto-watchdog-{job_id}",
+        ).start()
         job.future = self._executor.submit(self._run_job, job)
         logger.info("Job %s queued (%s, %d bytes)", job_id, input_name, input_size)
         # Return a deep copy so the caller's snapshot is decoupled from
@@ -153,13 +177,118 @@ class JobManager:
         return record.model_copy(deep=True)
 
     def cancel(self, job_id: str) -> bool:
+        """Request cancellation of a job, keeping its record.
+
+        Cancellation is cooperative (the worker checks ``cancel_event``
+        between stages) *plus* forcible: any child process (ffmpeg)
+        currently spawned by this job is terminated immediately, so a
+        cancel doesn't have to wait for a long call to return.
+        """
         with self._lock:
             job = self._jobs.get(job_id)
         if job is None:
             return False
         job.cancel_event.set()
+        self._kill_procs(job)
         logger.info("Job %s cancel requested", job_id)
         return True
+
+    # ------------------------------------------------------------------
+    # Child-process tracking / forcible stop
+    # ------------------------------------------------------------------
+
+    def _kill_procs(self, job: _Job) -> None:
+        """Terminate (then kill) every child process this job spawned."""
+        with self._lock:
+            procs = list(job.procs)
+        for proc in procs:
+            if proc.poll() is not None:
+                continue
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        deadline = time.monotonic() + 3.0
+        for proc in procs:
+            try:
+                proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _track_subprocess(self, job: _Job):
+        """Context manager recording every ``subprocess.Popen`` this
+        thread (i.e. this job) creates into ``job.procs``.
+
+        The pipeline calls ffmpeg through ``subprocess.run``, which
+        internally uses ``Popen``; patching that global gives us the
+        handles needed to interrupt a long-running encode.
+        """
+        manager = self
+        orig_popen = _subprocess.Popen
+
+        class _TrackedPopen(orig_popen):  # type: ignore[misc, valid-type]
+            def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                super().__init__(*args, **kwargs)
+                with manager._lock:
+                    job.procs.append(self)
+
+        manager._local.job = job
+
+        class _Ctx:
+            def __enter__(self):
+                _subprocess.Popen = _TrackedPopen
+                return self
+
+            def __exit__(self, *exc):
+                _subprocess.Popen = orig_popen
+                manager._local.job = None
+                return False
+
+        return _Ctx()
+
+    def _watchdog(self, job: _Job) -> None:
+        """Enforce cancellation and the hard timeout for one job.
+
+        A worker blocked inside ffmpeg or faster-whisper never reaches
+        the cooperative cancel checkpoints, so the watchdog polls the
+        cancel event and kills the offending child processes. It exits
+        once the worker returns (``job.done``).
+        """
+        job.run_started = time.monotonic()
+        timed_out = False
+        while not job.done.wait(self._watchdog_interval):
+            if job.cancel_event.is_set():
+                self._kill_procs(job)
+                continue
+            if self._job_timeout is not None:
+                elapsed = time.monotonic() - job.run_started
+                if elapsed > self._job_timeout:
+                    if not timed_out:
+                        timed_out = True
+                        logger.error(
+                            "Job %s exceeded %.0fs timeout — forcing stop",
+                            job.record.id, self._job_timeout,
+                        )
+                        job.cancel_event.set()
+                        self._kill_procs(job)
+                    # Give the worker a moment to unwind, then report.
+                    if job.done.wait(30):
+                        break
+                    self._set_status(
+                        job,
+                        "failed",
+                        stage="timeout",
+                        error=f"Timed out after {self._job_timeout / 3600:.1f}h",
+                        error_kind="timeout",
+                        error_stage="timeout",
+                    )
+                    break
+        # One final sweep in case a process was spawned right at the end.
+        if job.cancel_event.is_set():
+            self._kill_procs(job)
 
     def get(self, job_id: str) -> JobRecord | None:
         with self._lock:
@@ -224,6 +353,9 @@ class JobManager:
         if job is None:
             return False
         job.cancel_event.set()
+        # Stop any ffmpeg child right away; otherwise the worker thread
+        # keeps burning CPU on a job nobody can see any more.
+        self._kill_procs(job)
         # Close any per-job subscriber queues (their writers will exit).
         for sub in list(job.subscribers):
             try:
@@ -246,6 +378,7 @@ class JobManager:
             self._jobs.clear()
         for job in jobs:
             job.cancel_event.set()
+            self._kill_procs(job)
             shutil.rmtree(job.output_dir, ignore_errors=True)
         self._persist()
         self._broadcast_global({"type": "jobs.cleared"})
@@ -268,7 +401,12 @@ class JobManager:
                 r.model_dump(mode="json") for r in records
             ]
         try:
-            tmp = self._index_path.with_suffix(".json.tmp")
+            # Unique temp name: several threads (worker status updates,
+            # watchdog, submit) persist concurrently and a shared name
+            # races — one replace() would delete the other's temp file.
+            tmp = self._index_path.with_name(
+                f"{self._index_path.name}.{uuid.uuid4().hex}.tmp"
+            )
             tmp.write_text(
                 json.dumps({"version": 1, "jobs": payload}, ensure_ascii=False),
                 encoding="utf-8",
@@ -389,6 +527,10 @@ class JobManager:
             _stage_name[0] = name
             _last_event_t[0] = now
 
+        # Record every ffmpeg child spawned below so a cancel can kill
+        # it instead of waiting for the call to return.
+        tracker = self._track_subprocess(job)
+        tracker.__enter__()
         try:
             self._check_cancel(job)
             self._set_status(job, "running", stage="probing", progress=0.05,
@@ -504,6 +646,12 @@ class JobManager:
             )
             logger.exception("Job %s failed", record.id)
         finally:
+            # Release the watchdog and drop process handles.
+            self._kill_procs(job)
+            with self._lock:
+                job.procs.clear()
+            job.done.set()
+            tracker.__exit__(None, None, None)
             if self._on_job_done is not None:
                 try:
                     self._on_job_done(record.model_copy(deep=True))
@@ -712,6 +860,12 @@ class JobManager:
         rec = job.record
         now = datetime.now(tz=UTC)
         with self._lock:
+            # A job whose record was cancelled/deleted must not resurrect
+            # itself in the UI: the worker may still be unwinding from a
+            # long ffmpeg call and would otherwise emit a ``job.update``
+            # for a row the client has already removed (the SPA upserts
+            # unknown ids, so the row would pop back into the table).
+            alive = self._jobs.get(rec.id) is job
             rec.status = status
             if status == "running" and rec.started_at is None:
                 rec.started_at = now
@@ -739,6 +893,10 @@ class JobManager:
         # ``/api/ws`` connection) get a ``job.update`` message with the
         # same payload. Both carry the full record so the client can
         # replace its row in place.
+        if not alive:
+            # Record state locally (useful for logs / on_job_done) but
+            # send nothing to clients and don't rewrite the index.
+            return
         snapshot_with_urls = snapshot.with_download_urls()
         snapshot_json = snapshot_with_urls.model_dump(mode="json")
         if loop is not None:
