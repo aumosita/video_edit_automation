@@ -106,6 +106,14 @@ class JobOptions(BaseModel):
     )
     style_max_chars: int = Field(default=42, ge=5, le=200)
     style_max_lines: int = Field(default=2, ge=1, le=4)
+    style_split_sentence: bool = Field(
+        default=True,
+        description=(
+            "Start a new subtitle at sentence boundaries (. ! ? …). "
+            "An ellipsis only breaks when the next word does not "
+            "follow immediately."
+        ),
+    )
     style_min_duration: float = Field(default=0.8, ge=0.1)
     style_max_duration: float = Field(default=6.0, ge=0.5)
 
@@ -170,6 +178,7 @@ class JobOptions(BaseModel):
                     color=self._hex_to_fcpxml_color(self.style_color),
                     max_chars_per_line=self.style_max_chars,
                     max_lines=self.style_max_lines,
+                    split_on_sentence=self.style_split_sentence,
                     min_duration=self.style_min_duration,
                     max_duration=self.style_max_duration,
                 ),

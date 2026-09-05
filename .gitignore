@@ -26,10 +26,16 @@ uv.lock
 !examples/sample.fcpxml
 .temp/
 tmp/
+# Test samples (committed with force, but ignored for local dev)
+# Use `git add -f tests/samples/<file>` to commit new fixtures.
 tests/samples/*.wav
 tests/samples/*.mp4
 tests/samples/*.mov
-tests/output/
+tests/samples/*.aiff
+tests/samples/*.m4a
+tests/samples/*.flac
+# Large sample files (e.g. tests/samples/ccc.mov)
+tests/samples/ccc.mov
 
 # Coverage
 .coverage

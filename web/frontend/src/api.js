@@ -93,6 +93,9 @@ export function submitJob(file, options = {}) {
     style_offset_y: Number(options.style_offset_y ?? 0),
     style_template: options.style_template || "text",
     subtitle_offset: Number(options.subtitle_offset ?? 0),
+    style_max_chars: Number(options.style_max_chars ?? 42),
+    style_max_lines: Number(options.style_max_lines ?? 2),
+    style_split_sentence: options.style_split_sentence !== false,
   };
   params.set("options", JSON.stringify(json));
   const fd = new FormData();

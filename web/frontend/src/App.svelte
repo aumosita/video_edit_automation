@@ -135,6 +135,32 @@
     if (!iso) return "";
     return new Date(iso).toLocaleTimeString();
   }
+  // Ticking clock so "elapsed" for running jobs updates every second
+  // without waiting for the next WebSocket progress message.
+  let now = $state(Date.now());
+  let clockTimer = null;
+  function startClock() {
+    if (clockTimer) return;
+    clockTimer = setInterval(() => { now = Date.now(); }, 1000);
+  }
+  function stopClock() {
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+  }
+  $effect(() => {
+    if (jobs.some((j) => j.status === "queued" || j.status === "running")) startClock();
+    else stopClock();
+    return () => stopClock();
+  });
+  // Elapsed time: live count-up while running, frozen total once the
+  // job reaches a terminal state (completed / failed / cancelled).
+  function elapsed(job) {
+    if (!job.started_at) return null;
+    const start = new Date(job.started_at).getTime();
+    const end = job.finished_at
+      ? new Date(job.finished_at).getTime()
+      : now;
+    return Math.max(0, (end - start) / 1000);
+  }
 </script>
 
 <header class="topbar">
@@ -169,6 +195,7 @@
             <th>Kept</th>
             <th>Removed</th>
             <th>Started</th>
+            <th>Elapsed</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -189,6 +216,13 @@
               <td>{fmtDuration(job.kept_duration)}</td>
               <td>{fmtDuration(job.removed_duration)}</td>
               <td class="cell-time">{shortTime(job.started_at)}</td>
+              <td class="cell-time cell-elapsed">
+                {#if job.status === "running"}
+                  {fmtDuration(elapsed(job))}{job.stage ? ` · ${job.stage}` : ""}
+                {:else}
+                  {fmtDuration(elapsed(job))}
+                {/if}
+              </td>
               <td class="cell-actions">
                 {#if job.status === "queued" || job.status === "running"}
                   <button class="link danger" onclick={() => onCancel(job.id)}>Cancel</button>
@@ -218,7 +252,7 @@
             </tr>
             {#if (job.status === "failed" || job.status === "cancelled") && expandedErrors.has(job.id) && (job.error || job.error_traceback)}
               <tr class="row-detail row-{statusClass(job.status)}">
-                <td colspan="10" class="cell-error">
+                <td colspan="11" class="cell-error">
                   <div class="err-head">
                     <strong>{job.error_kind === "cancelled" ? "Cancelled" : "Failed"}</strong>
                     {#if job.error_stage}<span class="err-stage">stage: {job.error_stage}</span>{/if}

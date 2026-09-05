@@ -149,7 +149,7 @@ Frame rate: 30.000 fps
 | `--noise-db` | `-30.0` | 침묵 임계값 (dB) |
 | `--auto-threshold` | 끔 | 파일의 음량 분포에서 임계값 자동 산출. 음량이 낮은 녹음(음성 RMS가 -30dB 근처)에서 권장 |
 | `--min-silence` | `1.5` | 잘라낼 최소 침묵 길이 (초) |
-| `--margin` | `0.3` | 컷 양쪽에 남길 패딩 (초) |
+| `--margin` | `0.3` | 컷 양쪽에 남길 침묵 패딩 (초). 잘라내는 구간은 침묵에서 margin만큼 안쪽이 되어 음성이 잘리지 않음 |
 | `--min-keep-seconds` | `0.15` | 이보다 짧게 남은 조각 컷은 제거 (두 침묵 사이의 "글리치 컷" 방지) |
 | `--project-name` | `Auto Edit` | FCPXML의 `<project name="…">` |
 | `--event-name` | `veauto` | FCPXML의 `<event name="…">` |

@@ -133,6 +133,73 @@ def test_words_to_subtitle_segments_breaks_on_max_gap() -> None:
     assert [s.text for s in out] == ["hello world", "next"]
 
 
+def test_sentence_boundary_splits_subtitles() -> None:
+    words = [
+        _w(0.0, 0.4, "안녕하세요."),
+        _w(0.45, 0.9, "반갑습니다"),
+    ]
+    out = words_to_subtitle_segments(words, min_duration=0.0)
+    assert [s.text for s in out] == ["안녕하세요.", "반갑습니다"]
+
+
+def test_sentence_split_disabled_keeps_one_cue() -> None:
+    words = [
+        _w(0.0, 0.4, "안녕하세요."),
+        _w(0.45, 0.9, "반갑습니다"),
+    ]
+    out = words_to_subtitle_segments(
+        words, min_duration=0.0, split_on_sentence=False
+    )
+    assert len(out) == 1
+    assert out[0].text == "안녕하세요. 반갑습니다"
+
+
+def test_ellipsis_breaks_when_speech_resumes_later() -> None:
+    words = [
+        _w(0.0, 0.4, "거의 다 했어..."),
+        _w(1.5, 1.9, "그래"),  # gap > max_gap: real pause
+    ]
+    out = words_to_subtitle_segments(words, max_gap=0.6, min_duration=0.0)
+    assert [s.text for s in out] == ["거의 다 했어...", "그래"]
+
+
+def test_ellipsis_with_immediate_speech_stays_one_cue() -> None:
+    words = [
+        _w(0.0, 0.4, "말하고..."),
+        _w(0.5, 0.9, "그 다음에"),  # gap <= max_gap: utterance continues
+    ]
+    out = words_to_subtitle_segments(words, max_gap=0.6, min_duration=0.0)
+    assert len(out) == 1
+    assert out[0].text == "말하고... 그 다음에"
+
+
+def test_long_cue_wraps_into_display_lines() -> None:
+    words = [
+        _w(0.0, 0.3, "word " * 9 + "end"),  # 49 chars, words ≤ 5 chars
+        _w(0.4, 0.7, "tail " * 3 + "x"),   # 24 chars
+    ]
+    out = words_to_subtitle_segments(
+        words, max_chars_per_line=42, max_lines=2, min_duration=0.0
+    )
+    assert len(out) == 1
+    lines = out[0].text.split("\n")
+    assert len(lines) == 2
+    assert all(len(line) <= 42 for line in lines)
+    # No content lost by the wrap.
+    joined = out[0].text.replace("\n", " ")
+    assert joined == ("word " * 9 + "end" + " " + "tail " * 3 + "x")
+
+
+def test_exclamation_and_question_marks_break_sentences() -> None:
+    words = [
+        _w(0.0, 0.3, "정말?"),
+        _w(0.35, 0.6, "네!"),
+        _w(0.65, 1.0, "그렇습니다"),
+    ]
+    out = words_to_subtitle_segments(words, min_duration=0.0)
+    assert [s.text for s in out] == ["정말?", "네!", "그렇습니다"]
+
+
 def test_words_to_subtitle_segments_breaks_on_max_duration() -> None:
     words = [_w(float(i), float(i) + 0.2, f"w{i}") for i in range(7)]
     out = words_to_subtitle_segments(

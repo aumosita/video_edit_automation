@@ -19,6 +19,7 @@ this module imports it at module-import time.
 from __future__ import annotations
 
 import importlib
+import math
 from collections.abc import Callable, Iterable
 from typing import Any, Literal
 
@@ -30,6 +31,94 @@ ComputePreference = Literal["auto", "int8", "int8_float16", "float16", "float32"
 # Minimum duration (seconds) any computed subtitle line is allowed to have.
 # It exists so very short bursts don't flash on screen.
 _MIN_DURATION_FLOOR = 0.2
+
+# Word endings that terminate a sentence (used when ``split_on_sentence``
+# is on). Covers Latin/CJK punctuation and the typographic ellipsis.
+_TERMINAL_PUNCT = (".", "!", "?", "。", "…")
+# Ellipsis variants: treated as sentence end, but *suppressed* when the
+# next word follows immediately (a trailing-off utterance that continues).
+_ELLIPSIS_SUFFIXES = ("...", "…", "..")
+
+
+def _strip_closing_quotes(text: str) -> str:
+    """Drop trailing quote/bracket chars so ``'end.'`` still reads as a
+    sentence end."""
+    return text.rstrip().rstrip('"\')}›»』」）)]〉》')
+
+
+def _ends_sentence(text: str) -> bool:
+    """Whether a word's text terminates a sentence.
+
+    The check is on the raw word text as produced by faster-whisper,
+    which attaches punctuation to the word token (e.g. ``"done."``).
+    Any run of terminal punctuation (``?!``, ``...?!``, ``..``) counts
+    as exactly one boundary — a word is only tested once.
+    """
+    stripped = _strip_closing_quotes(text)
+    return stripped.endswith(_TERMINAL_PUNCT)
+
+
+def _ends_with_ellipsis(text: str) -> bool:
+    """Whether a word ends in an ellipsis (``...`` / ``…`` / ``..``).
+
+    Must be tested *before* ``_ends_sentence`` matters: ``...`` also
+    ends with ``.``, but an ellipsis followed immediately by more
+    speech (short gap) usually means the utterance is continuing, so
+    the caller may suppress the break.
+    """
+    return _strip_closing_quotes(text).endswith(_ELLIPSIS_SUFFIXES)
+
+
+def _wrap_text(text: str, max_chars_per_line: int, max_lines: int) -> str:
+    """Wrap a cue's text into up to ``max_lines`` lines joined by ``\\n``.
+
+    The width is chosen as the *smallest* width in
+    ``[ceil(len/max_lines), max_chars_per_line]`` that still fits the
+    text in ``max_lines`` lines (greedy line packing is optimal for a
+    fixed width, so binary search is exact). This yields visually
+    balanced lines instead of a full first line + a dangling last
+    word. Single-line text is returned unchanged.
+    """
+    text = " ".join(text.split())
+    if len(text) <= max_chars_per_line or max_lines < 2:
+        return text
+    words = text.split()
+    if len(words) < 2:
+        return text
+
+    def _count_lines(width: int) -> int:
+        n, cur = 1, 0
+        for w in words:
+            if cur and cur + 1 + len(w) > width:
+                n += 1
+                cur = len(w)
+            else:
+                cur = len(w) if cur == 0 else cur + 1 + len(w)
+        return n
+
+    width = max_chars_per_line
+    if _count_lines(width) <= max_lines:
+        lo, hi = max(1, math.ceil(len(text) / max_lines)), width
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if _count_lines(mid) <= max_lines:
+                hi = mid
+            else:
+                lo = mid + 1
+        width = lo
+
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        cand = f"{cur} {w}" if cur else w
+        if cur and len(cand) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = cand
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines)
 
 
 def resolve_device(
@@ -109,6 +198,7 @@ def words_to_subtitle_segments(
     min_duration: float = 0.8,
     max_duration: float = 6.0,
     max_gap: float = 0.6,
+    split_on_sentence: bool = True,
 ) -> list[SubtitleSegment]:
     """Group transcribed ``Word``s into user-facing subtitle lines.
 
@@ -119,9 +209,17 @@ def words_to_subtitle_segments(
        exceed ``max_chars_per_line * max_lines``.
     2. The gap between the previous word and the next one exceeds ``max_gap``.
     3. The next word starts after the line would exceed ``max_duration``.
+    4. When ``split_on_sentence`` is on: the previous word ended with
+       terminal punctuation (``.`` ``!`` ``?`` ``。`` ``…``). An ellipsis
+       is treated as a sentence end *unless* the next word follows
+       immediately (gap within ``max_gap``), in which case a trailing-off
+       utterance like ``"말하고... 그 다음에"`` stays on one caption.
 
     After packing, each emitted line is clamped to ``[min_duration,
-    max_duration]`` by extending ``end`` or by splitting it.
+    max_duration]`` by extending ``end`` or by splitting it. Finally,
+    text longer than ``max_chars_per_line`` is wrapped into up to
+    ``max_lines`` display lines joined by ``\\n`` (SRT and FCPXML both
+    render the newline as a real line break).
     """
     style_min = max(min_duration, _MIN_DURATION_FLOOR)
     max_chars = max_chars_per_line * max_lines
@@ -168,10 +266,21 @@ def words_to_subtitle_segments(
         prospective_duration = word.end - buffer[0].start
         gap = word.start - buffer[-1].end
 
+        # Sentence boundary: the *previous* word ended a sentence. An
+        # ellipsis only breaks when the next word doesn't follow
+        # immediately (see ``split_on_sentence`` docs).
+        sentence_break = False
+        if split_on_sentence and _ends_sentence(buffer[-1].text):
+            if _ends_with_ellipsis(buffer[-1].text) and gap <= max_gap:
+                sentence_break = False
+            else:
+                sentence_break = True
+
         would_break = (
             len(prospective_text) > max_chars
             or prospective_duration > max_duration
             or gap > max_gap
+            or sentence_break
         )
         if would_break:
             next_start = word.start
@@ -201,6 +310,12 @@ def words_to_subtitle_segments(
     final = _merge_short_segments(
         final, style_min, max_duration, max_chars, max_gap
     )
+
+    # Wrap long cues into display lines (\n). Kept last so the merged /
+    # split results above are wrapped consistently.
+    if max_lines > 1:
+        for seg in final:
+            seg.text = _wrap_text(seg.text, max_chars_per_line, max_lines)
     return final
 
 

@@ -7,10 +7,11 @@ reporting/debugging.
 
 The pipeline is:
 
-1. Expand each silence interval by ``margin`` on each side, clamped to
-   ``[0, total_duration]``.
-2. Merge overlapping/adjacent expanded intervals (after margin, two close
-   silences naturally merge into one).
+1. Shrink each silence interval by ``margin`` on each side (the margin is
+   padding of *silence that is kept* attached to the speech, clamped to
+   ``[0, total_duration]``). Intervals shorter than ``2 * margin`` are
+   dropped entirely — cutting them would eat into speech.
+2. Merge overlapping/adjacent intervals.
 3. Subtract the merged silence regions from ``[0, total_duration]`` to obtain
    the cut segments.
 """
@@ -20,25 +21,25 @@ from __future__ import annotations
 from .models import CutSegment, RemovedSilence, SilenceInterval
 
 
-def _expand_with_margin(intervals, *, margin, total_duration):
-    """Expand each interval by margin and clamp to media bounds."""
+def _apply_margin(intervals, *, margin, total_duration):
+    """Shrink each interval by margin, clamped to media bounds.
+
+    The margin is padding of *kept* silence left on each side of a cut,
+    so the removed region is the silence interval shrunk by ``margin``
+    on both ends. This guarantees speech is never chopped: even if
+    silencedetect's boundary is slightly late/early, the cut stays
+    inside the detected silence. Intervals shorter than ``2 * margin``
+    are dropped entirely rather than allowed to cut into speech.
+    """
     if not intervals:
         return _merge_overlapping([])
-    if margin <= 0:
-        clamped = []
-        for iv in intervals:
-            s = max(0.0, iv.start)
-            e = min(total_duration, iv.end)
-            if e > s:
-                clamped.append(SilenceInterval(start=s, end=e))
-        return _merge_overlapping(clamped)
-    expanded = []
+    clamped = []
     for iv in intervals:
-        s = max(0.0, iv.start - margin)
-        e = min(total_duration, iv.end + margin)
+        s = max(0.0, iv.start + margin)
+        e = min(total_duration, iv.end - margin)
         if e > s:
-            expanded.append(SilenceInterval(start=s, end=e))
-    return _merge_overlapping(expanded)
+            clamped.append(SilenceInterval(start=s, end=e))
+    return _merge_overlapping(clamped)
 
 
 def _merge_overlapping(intervals):
@@ -82,7 +83,7 @@ def build_cut_segments(
         for iv in silence_intervals
         if 0.0 <= iv.start < iv.end <= total_duration
     ]
-    expanded = _expand_with_margin(
+    expanded = _apply_margin(
         silence_intervals, margin=margin, total_duration=total_duration
     )
     kept = []

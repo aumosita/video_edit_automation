@@ -232,6 +232,7 @@ def run_pipeline(
                 max_lines=config.subtitle.style.max_lines,
                 min_duration=config.subtitle.style.min_duration,
                 max_duration=config.subtitle.style.max_duration,
+                split_on_sentence=config.subtitle.style.split_on_sentence,
             )
 
             # B2: snap every subtitle to the nearest real audio

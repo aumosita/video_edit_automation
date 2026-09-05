@@ -6,7 +6,7 @@ import pytest
 
 from veauto.models import SilenceInterval
 from veauto.segments import (
-    _expand_with_margin,
+    _apply_margin,
     _merge_overlapping,
     build_cut_segments,
 )
@@ -65,49 +65,55 @@ def test_merge_overlapping_unsorted_input():
     assert out[1].start == 4.0
 
 
-def test_expand_with_margin_empty():
-    assert _expand_with_margin([], margin=0.2, total_duration=10.0) == []
+def test_apply_margin_empty():
+    assert _apply_margin([], margin=0.2, total_duration=10.0) == []
 
 
-def test_expand_with_margin_zero_margin():
+def test_apply_margin_zero_margin():
     ivs = [SilenceInterval(start=3.0, end=5.0)]
-    out = _expand_with_margin(ivs, margin=0.0, total_duration=10.0)
+    out = _apply_margin(ivs, margin=0.0, total_duration=10.0)
     assert len(out) == 1
     assert out[0].start == 3.0
     assert out[0].end == 5.0
 
 
-def test_expand_with_margin_basic():
+def test_apply_margin_basic():
     ivs = [SilenceInterval(start=3.0, end=5.0)]
-    out = _expand_with_margin(ivs, margin=0.2, total_duration=10.0)
+    out = _apply_margin(ivs, margin=0.2, total_duration=10.0)
     assert len(out) == 1
-    assert out[0].start == pytest.approx(2.8)
-    assert out[0].end == pytest.approx(5.2)
+    assert out[0].start == pytest.approx(3.2)
+    assert out[0].end == pytest.approx(4.8)
 
 
-def test_expand_with_margin_clamps_to_zero():
-    ivs = [SilenceInterval(start=0.1, end=0.5)]
-    out = _expand_with_margin(ivs, margin=1.0, total_duration=10.0)
-    assert out[0].start == 0.0
-    assert out[0].end == pytest.approx(1.5)
+def test_apply_margin_drops_interval_shorter_than_two_margins():
+    ivs = [SilenceInterval(start=3.0, end=3.5)]
+    out = _apply_margin(ivs, margin=0.3, total_duration=10.0)
+    assert out == []
 
 
-def test_expand_with_margin_clamps_to_total():
-    ivs = [SilenceInterval(start=9.5, end=9.9)]
-    out = _expand_with_margin(ivs, margin=1.0, total_duration=10.0)
-    assert out[0].start == pytest.approx(8.5)
-    assert out[0].end == 10.0
+def test_apply_margin_clamps_to_zero():
+    ivs = [SilenceInterval(start=0.0, end=1.0)]
+    out = _apply_margin(ivs, margin=0.3, total_duration=10.0)
+    assert out[0].start == pytest.approx(0.3)
+    assert out[0].end == pytest.approx(0.7)
 
 
-def test_expand_with_margin_merges_overlapping_after_expand():
+def test_apply_margin_clamps_to_total():
+    ivs = [SilenceInterval(start=9.5, end=10.0)]
+    out = _apply_margin(ivs, margin=0.2, total_duration=10.0)
+    assert out[0].start == pytest.approx(9.7)
+    assert out[0].end == pytest.approx(9.8)
+
+
+def test_apply_margin_merges_overlapping_after_shrink():
     ivs = [
-        SilenceInterval(start=2.0, end=3.0),
-        SilenceInterval(start=3.0, end=4.0),
+        SilenceInterval(start=2.0, end=3.5),
+        SilenceInterval(start=3.0, end=5.0),
     ]
-    out = _expand_with_margin(ivs, margin=0.2, total_duration=10.0)
+    out = _apply_margin(ivs, margin=0.25, total_duration=10.0)
     assert len(out) == 1
-    assert out[0].start == pytest.approx(1.8)
-    assert out[0].end == pytest.approx(4.2)
+    assert out[0].start == pytest.approx(2.25)
+    assert out[0].end == pytest.approx(4.75)
 
 
 def test_build_no_silence_returns_full():
@@ -121,7 +127,7 @@ def test_build_no_silence_returns_full():
 def test_build_single_silence_with_margin():
     sils = [SilenceInterval(start=3.0, end=5.0)]
     kept, removed = build_cut_segments(10.0, sils, margin=0.2)
-    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 2.8), (5.2, 10.0)]
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 3.2), (4.8, 10.0)]
     assert [(r.source_in, r.source_out) for r in removed] == [(3.0, 5.0)]
 
 
@@ -138,31 +144,33 @@ def test_build_two_silences():
     ]
     kept, _ = build_cut_segments(10.0, sils, margin=0.2)
     assert [(c.source_in, c.source_out) for c in kept] == [
-        (0.0, 1.8), (3.2, 4.8), (6.2, 10.0)
+        (0.0, 2.2), (2.8, 5.2), (5.8, 10.0)
     ]
 
 
-def test_build_margin_merges_close_silences():
+def test_build_margin_keeps_padding_inside_silence():
+    # The margin is padding of *kept* silence; the cut stays inside the
+    # detected silence, so speech between two silences is never chopped.
     sils = [
         SilenceInterval(start=2.0, end=3.0),
         SilenceInterval(start=3.0, end=4.0),
     ]
     kept, _ = build_cut_segments(10.0, sils, margin=0.2)
     assert [(c.source_in, c.source_out) for c in kept] == [
-        (0.0, 1.8), (4.2, 10.0)
+        (0.0, 2.2), (2.8, 3.2), (3.8, 10.0)
     ]
 
 
 def test_build_leading_silence():
     sils = [SilenceInterval(start=0.0, end=2.0)]
     kept, _ = build_cut_segments(10.0, sils, margin=0.2)
-    assert [(c.source_in, c.source_out) for c in kept] == [(2.2, 10.0)]
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 0.2), (1.8, 10.0)]
 
 
 def test_build_trailing_silence():
     sils = [SilenceInterval(start=8.0, end=10.0)]
     kept, _ = build_cut_segments(10.0, sils, margin=0.2)
-    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 7.8)]
+    assert [(c.source_in, c.source_out) for c in kept] == [(0.0, 8.2), (9.8, 10.0)]
 
 
 def test_build_silence_covers_entire_file():

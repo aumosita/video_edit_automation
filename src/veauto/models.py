@@ -148,6 +148,14 @@ class SubtitleStyle(BaseModel):
     shadow_blur: float = Field(default=8.0, ge=0.0)
     max_chars_per_line: int = Field(default=42, ge=5, le=200)
     max_lines: int = Field(default=2, ge=1, le=4)
+    split_on_sentence: bool = Field(
+        default=True,
+        description=(
+            "Start a new subtitle when a word ends with terminal "
+            "punctuation (. ! ? 。 …). An ellipsis only breaks when the "
+            "next word does not follow immediately."
+        ),
+    )
     min_duration: float = Field(default=0.8, ge=0.1, description="Minimum display seconds")
     max_duration: float = Field(default=6.0, ge=0.5, description="Maximum display seconds")
 
