@@ -232,13 +232,10 @@
   }
   function fmtSpeed(x) {
     if (x == null || !Number.isFinite(x)) return "—";
-    return `${x.toFixed(1)}×`;
-  }
-  // %/minute fallback when the source duration is unknown.
-  function pctPerMin(job) {
-    const el = elapsed(job);
-    if (el == null || el <= 0.5 || job.input_duration != null) return null;
-    return ((job.progress || 0) * 100 * 60) / el;
+    // Realtime multiplier: how many source-seconds are handled per
+    // wall-clock second. Five decimal places keeps the value stable
+    // when the rate is very slow (e.g. long videos transcoding).
+    return `${x.toFixed(5)}×`;
   }
   function etaSeconds(job) {
     if (job.status !== "running") return null;
@@ -254,6 +251,45 @@
     const m = Math.floor(secs / 60);
     const s = Math.round(secs % 60);
     return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  // ---- Per-stage progress rendering ----------------------------------
+  // The backend now sends a ``stages`` array on every job update. We
+  // render it as a single horizontal bar split into one coloured
+  // segment per stage, with the active stage's bar fill animated to
+  // its within-stage ``progress``. A small legend below lists each
+  // stage with its status icon, so the user always knows which
+  // stage is active and how far each one has gotten.
+
+  // The bar widths are determined by the backend's ``weight`` field
+  // (already normalised so they sum to 100%). We render them as a
+  // CSS grid with each cell's width = weight% — no float drift in
+  // ``width: calc(...)``.
+  function stackedSegments(stages) {
+    if (!Array.isArray(stages) || stages.length === 0) return null;
+    // ``flex-basis`` percentages should sum to ~100% but the
+    // backend may emit rounded numbers that drift a hair; we use
+    // the last cell to absorb the rounding so they always fit.
+    const segments = stages.map((s, i) => ({
+      ...s,
+      // 0..1 within-stage fill, only meaningful for "active".
+      fill: s.status === "active"
+        ? Math.max(0, Math.min(1, s.progress || 0))
+        : s.status === "done"
+          ? 1
+          : 0,
+      // Visual class for colour-coding.
+      klass: `seg-${s.status}`,
+      // Display text below the bar.
+      icon: s.status === "done"
+        ? "\u2713"
+        : s.status === "active"
+          ? "\u25B6"
+          : s.status === "skipped"
+            ? "\u00B7"
+            : "\u00B7",
+    }));
+    return segments;
   }
 
   function useSettings(job) {
@@ -321,28 +357,63 @@
               <td class="cell-name" title={job.input_name}>{job.input_name}</td>
               <td><span class="badge badge-{statusClass(job.status)}">{job.status}</span></td>
               <td class="cell-progress">
-                <!-- Percent label sits above the bar; the current stage
-                     rides along on the same line. -->
-                <div class="pct-row">
-                  <span class="pct-label">{Math.round((job.progress || 0) * 100)}%</span>
-                  {#if job.stage && job.status !== "completed" && job.stage !== "queued"}
-                    <span class="stage-label">{job.stage}</span>
-                  {/if}
-                </div>
-                <div class="progress">
-                  <div
-                    class="bar {statusClass(job.status)}"
-                    style="width: {Math.round((job.progress || 0) * 100)}%"
-                  ></div>
-                </div>
+                {#if stackedSegments(job.stages)}
+                  {@const segments = stackedSegments(job.stages)}
+                  <div class="pct-row">
+                    <span class="pct-label">{Math.round((job.progress || 0) * 100)}%</span>
+                    {#if job.status === "running" && job.stage && job.stage !== "queued"}
+                      <span class="stage-label">{job.stage}</span>
+                    {/if}
+                  </div>
+                  <div class="stacked-bar" role="progressbar" aria-valuenow={Math.round((job.progress || 0) * 100)} aria-valuemin="0" aria-valuemax="100">
+                    {#each segments as seg (seg.name)}
+                      <div
+                        class="stage-segment {seg.klass}"
+                        style="flex-basis: {(seg.weight * 100).toFixed(3)}%"
+                        title="{seg.label} \u2014 {seg.status} ({Math.round(seg.fill * 100)}%)"
+                      >
+                        <div class="stage-fill" style="width: {(seg.fill * 100).toFixed(2)}%"></div>
+                      </div>
+                    {/each}
+                  </div>
+                  <ul class="stage-list" aria-label="Pipeline stages">
+                    {#each segments as seg (seg.name)}
+                      <li class="stage-item stage-item-{seg.status}">
+                        <span class="stage-icon">{seg.icon}</span>
+                        <span class="stage-name">{seg.label}</span>
+                        {#if seg.status === "active"}
+                          <span class="stage-pct">{Math.round(seg.fill * 100)}%</span>
+                        {:else if seg.status === "done"}
+                          <span class="stage-pct">done</span>
+                        {:else if seg.status === "skipped"}
+                          <span class="stage-pct">skipped</span>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <!-- Legacy fallback for jobs that have no ``stages``
+                       field yet (e.g. older running jobs after a
+                       rolling deploy). The single-bar view still
+                       works; once the worker emits a state with
+                       ``stages`` this branch is replaced. -->
+                  <div class="pct-row">
+                    <span class="pct-label">{Math.round((job.progress || 0) * 100)}%</span>
+                    {#if job.stage && job.status !== "completed" && job.stage !== "queued"}
+                      <span class="stage-label">{job.stage}</span>
+                    {/if}
+                  </div>
+                  <div class="progress">
+                    <div
+                      class="bar {statusClass(job.status)}"
+                      style="width: {Math.round((job.progress || 0) * 100)}%"
+                    ></div>
+                  </div>
+                {/if}
               </td>
               <td class="cell-speed">
                 <div class="speed-main">
-                  {#if job.input_duration == null && pctPerMin(job) != null}
-                    {pctPerMin(job).toFixed(0)}%/min
-                  {:else}
-                    {fmtSpeed(avgSpeed(job))}
-                  {/if}
+                  {fmtSpeed(avgSpeed(job))}
                 </div>
                 {#if job.status === "running"}
                   {#if recentSpeed(job) != null}

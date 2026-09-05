@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from veauto.web.jobs import JobCancelled, JobManager
+from veauto.web.jobs import (
+    JobCancelled,
+    JobManager,
+    _build_stages,
+    _overall_progress,
+)
 from veauto.web.schemas import JobOptions
 
 # ---------------------------------------------------------------------------
@@ -597,4 +602,219 @@ class TestGlobalBroadcast:
             assert msg["job"]["fcpxml_url"] is None  # no artefact yet
         finally:
             loop.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-stage progress helpers
+# ---------------------------------------------------------------------------
+
+
+class TestBuildStages:
+    """``_build_stages`` returns the per-stage table for a job.
+
+    The default shape (both silence and subtitles enabled) has 8
+    stages whose weights sum to 1.0. ``no_subtitles`` and
+    ``no_silence`` filter the right ones out and renormalise the
+    remaining weights so the overall progress bar still tops out at
+    100% when every stage finishes.
+    """
+
+    def test_default_eight_stages_sum_to_one(self):
+        stages = _build_stages(JobOptions())
+        assert [s.name for s in stages] == [
+            "probing",
+            "detecting_silence",
+            "building_cuts",
+            "extracting_audio",
+            "transcribing",
+            "grouping_subtitles",
+            "rendering_fcpxml",
+            "writing",
+        ]
+        total = sum(s.weight for s in stages)
+        assert abs(total - 1.0) < 1e-9
+        for s in stages:
+            assert s.status == "pending"
+            assert s.progress == 0.0
+            assert s.label
+
+    def test_no_subtitles_drops_transcribe_chain(self):
+        stages = _build_stages(JobOptions(no_subtitles=True))
+        names = [s.name for s in stages]
+        assert "extracting_audio" not in names
+        assert "transcribing" not in names
+        assert "grouping_subtitles" not in names
+        total = sum(s.weight for s in stages)
+        assert abs(total - 1.0) < 1e-9
+        # With the 0.60 transcribe chain removed, silence detection is
+        # the dominant stage; the bar visibly slows down for it
+        # compared to the default case.
+        assert max(stages, key=lambda s: s.weight).name == "detecting_silence"
+        # And the 0.15 silence stage grows past 0.30 of the bar
+        # (0.15 / 0.40 = 0.375), so the renormalised weight must be
+        # strictly greater than 0.30.
+        silence = next(s for s in stages if s.name == "detecting_silence")
+        assert silence.weight > 0.30
+
+    def test_no_silence_drops_silence_chain(self):
+        stages = _build_stages(JobOptions(no_silence=True))
+        names = [s.name for s in stages]
+        assert "detecting_silence" not in names
+        assert "building_cuts" not in names
+        assert "transcribing" in names
+        total = sum(s.weight for s in stages)
+        assert abs(total - 1.0) < 1e-9
+
+    def test_both_off_keeps_probing_render_write(self):
+        stages = _build_stages(
+            JobOptions(no_silence=True, no_subtitles=True)
+        )
+        names = [s.name for s in stages]
+        assert names == ["probing", "rendering_fcpxml", "writing"]
+        total = sum(s.weight for s in stages)
+        assert abs(total - 1.0) < 1e-9
+
+    def test_subtitle_target_none_drops_transcribe_chain(self):
+        # The 4-way ``subtitle_target`` control is the new way to
+        # disable STT (the legacy ``no_subtitles`` bool is still
+        # accepted). Both must yield the same stage set.
+        stages_legacy = _build_stages(JobOptions(no_subtitles=True))
+        stages_new = _build_stages(
+            JobOptions(subtitle_target="none")
+        )
+        assert [s.name for s in stages_legacy] == [
+            s.name for s in stages_new
+        ]
+
+    def test_subtitle_target_overrides_no_subtitles(self):
+        # When both flags are set, the explicit 4-way control wins.
+        # ``subtitle_target="srt"`` keeps STT (so the chain stays)
+        # even though ``no_subtitles=True`` is also set.
+        stages = _build_stages(
+            JobOptions(
+                no_subtitles=True, subtitle_target="srt"
+            )
+        )
+        names = [s.name for s in stages]
+        assert "transcribing" in names
+        assert "extracting_audio" in names
+
+    def test_subtitle_target_srt_keeps_stt_chain(self):
+        stages = _build_stages(JobOptions(subtitle_target="srt"))
+        names = [s.name for s in stages]
+        assert "transcribing" in names
+        total = sum(s.weight for s in stages)
+        assert abs(total - 1.0) < 1e-9
+
+
+class TestOverallProgress:
+    """``_overall_progress`` is the weighted sum of stage contributions.
+
+    Done stages contribute their full weight, the active stage
+    contributes ``weight * progress``, pending / skipped contribute
+    nothing. The value is clamped to ``[0, 0.99]`` so the bar never
+    hits a flat 100% before the ``completed`` event arrives.
+    """
+
+    def test_all_pending_is_zero(self):
+        stages = _build_stages(JobOptions())
+        assert _overall_progress(stages) == 0.0
+
+    def test_all_done_is_clamped_just_under_one(self):
+        stages = _build_stages(JobOptions())
+        for s in stages:
+            s.status = "done"
+            s.progress = 1.0
+        # The 0.99 ceiling mirrors the old
+        # ``min(0.95, max(0.05, ...))`` behaviour so the bar leaves
+        # room for the explicit "completed" jump to 1.0.
+        assert _overall_progress(stages) == 0.99
+
+    def test_partial_active_progress(self):
+        stages = _build_stages(JobOptions())
+        for s in stages:
+            if s.name == "probing":
+                s.status = "done"
+                s.progress = 1.0
+            elif s.name == "detecting_silence":
+                s.status = "active"
+                s.progress = 0.5
+        # 0.05 (probing) + 0.15 * 0.5 (silence half) = 0.125
+        assert abs(_overall_progress(stages) - 0.125) < 1e-9
+
+    def test_skipped_contributes_nothing(self):
+        stages = _build_stages(JobOptions())
+        for s in stages:
+            if s.name == "transcribing":
+                s.status = "skipped"
+                s.progress = 0.0
+            elif s.name == "writing":
+                s.status = "done"
+                s.progress = 1.0
+        # Only "writing" (0.10) contributes; the rest are pending.
+        assert abs(_overall_progress(stages) - 0.10) < 1e-9
+
+
+class TestUpdateStage:
+    """``JobManager._update_stage`` mutates the stage table in place.
+
+    Activating a new stage auto-closes any previously active stage
+    (status=done, progress=1.0) so the stacked bar never shows two
+    active segments at once. The within-stage ``progress`` is
+    clamped, and unknown stage names are silently ignored because
+    downstream progress hooks may report stages that were filtered
+    out by the job options.
+    """
+
+    def test_activate_closes_previous_active(
+        self, manager: JobManager
+    ):
+        stages = _build_stages(JobOptions())
+        manager._update_stage(  # type: ignore[attr-defined]
+            stages, "probing", active=True, fraction=0.4,
+        )
+        manager._update_stage(  # type: ignore[attr-defined]
+            stages, "detecting_silence", active=True, fraction=0.0,
+        )
+        probing = next(s for s in stages if s.name == "probing")
+        silence = next(s for s in stages if s.name == "detecting_silence")
+        assert probing.status == "done"
+        assert probing.progress == 1.0
+        assert silence.status == "active"
+        assert silence.progress == 0.0
+
+    def test_fraction_clamped(self, manager: JobManager):
+        stages = _build_stages(JobOptions())
+        manager._update_stage(  # type: ignore[attr-defined]
+            stages, "transcribing", active=True, fraction=1.7,
+        )
+        s = next(x for x in stages if x.name == "transcribing")
+        assert s.progress == 1.0
+        manager._update_stage(  # type: ignore[attr-defined]
+            stages, "transcribing", active=True, fraction=-0.5,
+        )
+        s = next(x for x in stages if x.name == "transcribing")
+        assert s.progress == 0.0
+
+    def test_unknown_stage_is_ignored(self, manager: JobManager):
+        stages = _build_stages(JobOptions(no_subtitles=True))
+        # The transcribe chain is filtered out; a downstream progress
+        # hook still trying to report it must not crash the worker.
+        manager._update_stage(  # type: ignore[attr-defined]
+            stages, "transcribing", active=True, fraction=0.5,
+        )
+        assert "transcribing" not in [s.name for s in stages]
+
+    def test_skipped_takes_precedence(self, manager: JobManager):
+        stages = _build_stages(JobOptions())
+        manager._update_stage(  # type: ignore[attr-defined]
+            stages, "grouping_subtitles", active=True, fraction=0.3,
+        )
+        manager._update_stage(  # type: ignore[attr-defined]
+            stages, "grouping_subtitles", active=False, fraction=0.0,
+            skipped=True,
+        )
+        s = next(x for x in stages if x.name == "grouping_subtitles")
+        assert s.status == "skipped"
+        assert s.progress == 0.0
 

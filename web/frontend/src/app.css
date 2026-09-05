@@ -170,7 +170,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* Progress cell: percentage (and current stage) sits above the bar so
  * the number is readable at a glance instead of squeezed beside it. */
-.cell-progress { min-width: 110px; }
+.cell-progress { min-width: 180px; max-width: 260px; }
 .pct-row {
   display: flex; align-items: baseline; gap: 6px;
   margin-bottom: 3px; line-height: 1;
@@ -180,6 +180,85 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   font-size: 11px; font-weight: 600; color: var(--text);
 }
 .stage-label { font-size: 10px; color: var(--text-dim); }
+
+/* Stacked progress bar: one segment per pipeline stage, side by
+ * side. Each segment's flex-basis is the stage's weight (in %), so
+ * the layout never drifts regardless of how many stages are
+ * active. The active stage's inner ``.stage-fill`` is animated to
+ * the within-stage fraction. */
+.stacked-bar {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  background: var(--bg-2, rgba(0, 0, 0, 0.08));
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+}
+.stage-segment {
+  position: relative;
+  flex-grow: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: transparent;
+  /* Thin separator between stages so adjacent same-status stages
+   * still read as distinct. */
+  border-right: 1px solid rgba(255, 255, 255, 0.15);
+}
+.stage-segment:last-child { border-right: none; }
+.stage-fill {
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 0%;
+  transition: width 0.4s ease;
+  border-radius: 2px;
+}
+/* Status-driven colour coding. Done = filled, active = filled with
+ * a brighter tint, pending = empty (track colour shows through),
+ * skipped = a flat dim stripe so it reads as "not run". */
+.seg-done    .stage-fill { background: var(--ok,    #2ea043); opacity: 0.85; }
+.seg-active  .stage-fill { background: var(--accent, #3b82f6); opacity: 1; }
+.seg-skipped .stage-fill { background: var(--text-dim, #888); opacity: 0.4; }
+.seg-pending .stage-fill { background: transparent; }
+
+/* Per-stage list rendered below the bar. Compact two-column grid
+ * (icon, name) with the active stage's right column showing the
+ * live percentage. */
+.stage-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  row-gap: 1px;
+  column-gap: 4px;
+  font-size: 10px;
+  line-height: 1.35;
+}
+.stage-item {
+  display: contents;
+}
+.stage-icon {
+  text-align: center;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.stage-name {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stage-pct {
+  color: var(--text-dim);
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+}
+.stage-item-active .stage-icon { color: var(--accent, #3b82f6); }
+.stage-item-active .stage-pct  { color: var(--accent, #3b82f6); font-weight: 600; }
+.stage-item-done   .stage-icon { color: var(--ok,    #2ea043); }
+.stage-item-done   .stage-name { color: var(--text-dim); }
+.stage-item-skipped .stage-name { color: var(--text-dim); font-style: italic; }
 
 /* Speed column: average speed on top, last-60s speed and ETA below. */
 .cell-speed { white-space: nowrap; }

@@ -20,6 +20,32 @@ from ..models import (
 # ---------------------------------------------------------------------------
 
 
+class StageState(BaseModel):
+    """Per-stage progress for a running job.
+
+    Each job is split into a small number of well-defined stages
+    (probing, detecting silence, transcribing, etc.). The UI shows
+    one stacked segment per stage and animates the current one as it
+    makes progress — so the user always knows which stage is active
+    and how far each stage has gotten, instead of seeing one global
+    bar that jumps by 30% the moment transcribing starts.
+
+    ``weight`` is the contribution of this stage to the overall
+    ``JobRecord.progress`` (0..1 across all stages). It's set at
+    job-start time based on the job's options and stays fixed
+    throughout the run.
+    """
+
+    name: str
+    label: str
+    weight: float
+    status: Literal["pending", "active", "done", "skipped"] = "pending"
+    # Within-stage fraction 0..1. Only meaningful while ``status ==
+    # "active"``; kept at 1.0 for ``done``, 0.0 for ``pending`` /
+    # ``skipped``.
+    progress: float = 0.0
+
+
 class JobOptions(BaseModel):
     """User-controllable options for a single job.
 
@@ -71,7 +97,7 @@ class JobOptions(BaseModel):
         "tiny", "base", "small", "medium", "large-v3", "distil-large-v3"
     ] = "medium"
     language: str | None = None
-    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
+    device: Literal["auto", "cpu", "cuda", "mps", "metal"] = "auto"
     compute_type: Literal[
         "auto", "int8", "int8_float16", "float16", "float32"
     ] = "auto"
@@ -239,6 +265,13 @@ class JobRecord(BaseModel):
     num_subtitles: int | None = None
     kept_duration: float | None = None
     removed_duration: float | None = None
+    # Per-stage progress for the live UI. ``stages[i].progress`` is the
+    # 0..1 fraction *within* that stage, not the global progress. The
+    # overall ``progress`` field is the weighted sum of completed-stage
+    # contributions plus the current stage's partial contribution. See
+    # :class:`StageState` and the ``jobs.py`` ``_progress`` hook for
+    # how the values are kept in sync.
+    stages: list[StageState] = Field(default_factory=list)
     # Computed at serialisation time — see ``_attach_urls``.
     fcpxml_url: str | None = None
     report_md_url: str | None = None

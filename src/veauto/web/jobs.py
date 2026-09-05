@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..report import build_report_data
-from .schemas import JobOptions, JobRecord
+from .schemas import JobOptions, JobRecord, StageState
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,99 @@ JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 class JobCancelled(Exception):
     """Raised inside the worker when the job was cancelled."""
+
+
+# Per-stage weights used by ``_build_stages`` for the live progress UI.
+# These are the *raw* weights for the default (both stages enabled)
+# case; when the user disables one of the stages the remaining
+# weights are renormalised so they still sum to 1.0.
+_DEFAULT_STAGE_WEIGHTS: dict[str, float] = {
+    "probing": 0.05,
+    "detecting_silence": 0.15,
+    "building_cuts": 0.05,
+    "extracting_audio": 0.05,
+    "transcribing": 0.50,
+    "grouping_subtitles": 0.05,
+    "rendering_fcpxml": 0.05,
+    "writing": 0.10,
+}
+_DEFAULT_STAGE_LABELS: dict[str, str] = {
+    "probing": "Probing media",
+    "detecting_silence": "Detecting silence",
+    "building_cuts": "Building cuts",
+    "extracting_audio": "Extracting audio",
+    "transcribing": "Transcribing",
+    "grouping_subtitles": "Grouping subtitles",
+    "rendering_fcpxml": "Rendering FCPXML",
+    "writing": "Writing outputs",
+}
+
+
+def _build_stages(opts: JobOptions) -> list[StageState]:
+    """Build the per-stage progress table for one job.
+
+    Stages that don't apply to the requested options are filtered out
+    (transcribe-related stages when ``no_subtitles`` or
+    ``subtitle_target="none"``; silence / cuts when ``no_silence``).
+    The remaining stages' weights are renormalised so the overall
+    bar still tops out at 100% when every stage is done.
+
+    The function reads both the legacy ``no_subtitles`` bool and the
+    new ``subtitle_target`` 4-way control — whichever is in effect,
+    the transcribe chain (``extracting_audio`` / ``transcribing`` /
+    ``grouping_subtitles``) is dropped iff the resolved subtitle
+    config has no STT. ``subtitle_target`` takes precedence when
+    both are set (mirrors :meth:`JobOptions.to_pipeline_config`).
+    """
+    if opts.subtitle_target is not None:
+        stt_enabled = opts.subtitle_target in ("both", "srt", "fcpxml")
+    else:
+        stt_enabled = not opts.no_subtitles
+    enabled: list[str] = []
+    enabled.append("probing")
+    if not opts.no_silence:
+        enabled.append("detecting_silence")
+        enabled.append("building_cuts")
+    if stt_enabled:
+        enabled.append("extracting_audio")
+        enabled.append("transcribing")
+        enabled.append("grouping_subtitles")
+    enabled.append("rendering_fcpxml")
+    enabled.append("writing")
+    raw = [_DEFAULT_STAGE_WEIGHTS[n] for n in enabled]
+    total = sum(raw) or 1.0
+    return [
+        StageState(
+            name=n,
+            label=_DEFAULT_STAGE_LABELS[n],
+            weight=w / total,
+            status="pending",
+            progress=0.0,
+        )
+        for n, w in zip(enabled, raw)
+    ]
+
+
+def _overall_progress(stages: list[StageState]) -> float:
+    """Sum each stage's weight × (1.0 if done, 0.0 if pending /
+    skipped, ``progress`` if active) into a 0..1 overall value.
+
+    Used by ``_set_status`` as the new ``JobRecord.progress`` so the
+    legacy single-bar clients keep working alongside the new
+    per-stage UI.
+    """
+    if not stages:
+        return 0.0
+    total = 0.0
+    for s in stages:
+        if s.status == "done":
+            total += s.weight * 1.0
+        elif s.status == "active":
+            total += s.weight * s.progress
+    # Clamp into the open interval (0, 1) to match the pre-existing
+    # ``min(0.95, max(0.05, ...))`` behaviour that the progress bar
+    # used to apply at the call site.
+    return min(0.99, max(0.0, total))
 
 
 class _Subscriber:
@@ -488,6 +581,53 @@ class JobManager:
     # ------------------------------------------------------------------
     # Worker
     # ------------------------------------------------------------------
+    # Per-stage progress helpers
+    # ------------------------------------------------------------------
+
+    def _update_stage(
+        self,
+        stages: list[StageState],
+        name: str,
+        *,
+        active: bool,
+        fraction: float,
+        skipped: bool = False,
+    ) -> None:
+        """Mutate ``stages`` to reflect a new state for ``name``.
+
+        When ``active=True``, any previously active stage is closed
+        out (``status="done"``, ``progress=1.0``) so the stacked bar
+        doesn't show two active segments at once. The new active
+        stage's within-stage ``progress`` is set to ``fraction``,
+        clamped to ``[0, 1]``.
+
+        ``skipped=True`` is used for stages that never ran (e.g. no
+        subtitles to group). It takes precedence over ``active``.
+        """
+        fraction = max(0.0, min(1.0, float(fraction)))
+        if active and not skipped:
+            # Close out any previously active stage so the bar never
+            # shows two active segments at once. This must run
+            # *before* the name lookup below in case the new active
+            # stage happens to be the same one (no-op re-emit).
+            for s in stages:
+                if s.status == "active" and s.name != name:
+                    s.status = "done"
+                    s.progress = 1.0
+        for s in stages:
+            if s.name == name:
+                if skipped:
+                    s.status = "skipped"
+                    s.progress = 0.0
+                elif active:
+                    s.status = "active"
+                    s.progress = fraction
+                return
+        # Stage name not in the table — likely a hook reporting a
+        # stage that was filtered out by options. Silently ignore so
+        # a downstream ``_progress`` call doesn't crash the worker.
+
+    # ------------------------------------------------------------------
 
     def _check_cancel(self, job: _Job) -> None:
         if job.cancel_event.is_set():
@@ -533,20 +673,42 @@ class JobManager:
         tracker.__enter__()
         try:
             self._check_cancel(job)
-            self._set_status(job, "running", stage="probing", progress=0.05,
-                             message="Probing media…")
-            _enter_stage("probing")
             cfg = record.options.to_pipeline_config()
+            # Initialise the per-stage progress table based on the job's
+            # options. ``no_subtitles`` skips the audio / transcribe /
+            # grouping stages; ``no_silence`` skips the silence /
+            # cuts stages. The remaining stages keep their normal
+            # weights and their sum is renormalised to 1.0.
+            stages = _build_stages(record.options)
+            with self._lock:
+                record.stages = stages
+            # First stage is "probing" — mark it active from the start
+            # so the stacked bar shows motion immediately.
+            self._update_stage(stages, "probing", active=True, fraction=0.0)
+            overall = _overall_progress(stages)
+            self._set_status(
+                job, "running", stage="probing", progress=overall,
+                message="Probing media…",
+            )
+            _enter_stage("probing")
 
             def _progress(stage: str, fraction: float, message: str = "") -> None:
                 if job.cancel_event.is_set():
                     raise JobCancelled()
                 _heartbeat()
+                # Mark the previously active stage as done (if any) and
+                # make ``stage`` the new active one. ``fraction`` is the
+                # *within-stage* 0..1 value coming from the
+                # ``_run_pipeline_with_progress`` hooks.
+                self._update_stage(
+                    stages, stage, active=True, fraction=fraction,
+                )
+                overall = _overall_progress(stages)
                 self._set_status(
                     job,
                     "running",
                     stage=stage,
-                    progress=min(0.95, max(0.05, fraction)),
+                    progress=overall,
                     message=message,
                 )
 
@@ -579,8 +741,14 @@ class JobManager:
                 from ..srt import write_srt
                 write_srt(result.subtitles, job.output_dir / srt_name)
 
-            self._set_status(job, "running", stage="writing", progress=0.97,
-                             message="Writing report…")
+            # Mark the post-pipeline "writing" stage active and update
+            # the stacked bar / overall progress.
+            self._update_stage(stages, "writing", active=True, fraction=0.0)
+            self._set_status(
+                job, "running", stage="writing",
+                progress=_overall_progress(stages),
+                message="Writing report…",
+            )
             report_data = build_report_data(result)
             (job.output_dir / report_json_name).write_text(
                 json.dumps(report_data, indent=2, ensure_ascii=False),
@@ -602,6 +770,23 @@ class JobManager:
                 record.report_json_name = report_json_name
                 record.srt_name = srt_name
 
+            # If no subtitles were generated the grouping stage has
+            # nothing to do — mark it skipped so the stacked bar
+            # doesn't leave an empty segment that the user mistakes
+            # for a not-yet-started stage.
+            if not result.subtitles:
+                self._update_stage(
+                    stages, "grouping_subtitles", active=False, fraction=0.0,
+                    skipped=True,
+                )
+            # Final flush: every remaining active stage completes at
+            # 1.0 so the bar reads as a clean 100%.
+            for s in stages:
+                if s.status == "active":
+                    s.status = "done"
+                    s.progress = 1.0
+            with self._lock:
+                record.stages = list(stages)
             self._set_status(
                 job, "completed", stage="done", progress=1.0,
                 message=f"Done in {result.kept_duration:.1f}s kept "
