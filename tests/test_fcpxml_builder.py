@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from veauto.fcpxml_builder import (
     _assign_subtitles_to_cuts,
     _rational_time,
+    _title_position_value,
     build_fcpxml,
 )
 from veauto.models import (
@@ -653,3 +654,183 @@ class TestRemapCutsToCompactedTimeline:
         ]
         out = _remap_cuts_to_compacted_timeline(cuts)
         assert [c.source_in for c in out] == [0.0, 3.0, 9.0]
+
+
+class TestMultiLineSubtitleShift:
+    """A multi-line subtitle (text containing ``\\n``) used to render
+    with its lower half clipped off the frame, because FCP centers the
+    title's text box vertically and a 2-line cue expands the box
+    equally up *and* down from the anchor. The fix is to lift the box
+    by ``(line_count - 1) * line_height`` so the *last* line stays on
+    the user-tuned anchor.
+
+    These tests pin the four invariants that make this safe:
+
+    1. A 1-line cue at the user's ``offset_y`` stays exactly where
+       it used to be (no regression on existing exports).
+    2. A 2-line cue is shifted up by exactly one ``line_height``.
+    3. ``offset_y`` is preserved on both 1- and 2-line cues.
+    4. Top / center / bottom all follow the same rule.
+    """
+
+    def test_one_line_default_offset_y_unchanged(self):
+        """Bottom + 56pt font + 0 offset → 1-line Y stays at -300.
+
+        This is the exact value the existing
+        ``test_title_position_param_uses_fcp_real_key`` test asserts;
+        if this shifts, every existing export's vertical placement
+        changes and titles land in the wrong place.
+        """
+        style = SubtitleStyle()  # position=bottom, font_size=56
+        assert _title_position_value(style, 1080, line_count=1) == "0 -300"
+
+    def test_one_line_custom_offset_y_preserved(self):
+        """The user's ``offset_y = -180`` tuning must round-trip on a
+        1-line cue (this is the knob the user is currently using).
+
+        ``offset_y`` is **additive** to the base position — bottom
+        base is -300, so -180 pushes the cue an extra 180px up
+        (-300 + -180 = -480). The user's "-180" knob is the
+        delta from the auto-computed base, not an absolute Y.
+        """
+        style = SubtitleStyle(offset_y=-180)
+        assert _title_position_value(style, 1080, line_count=1) == "0 -480"
+
+    def test_two_line_lifts_by_one_line_height(self):
+        """A 2-line cue must sit one ``line_height`` higher than a
+        1-line cue at the same ``offset_y`` so its *last* line lands
+        on the original anchor instead of the lower half clipping.
+
+        56pt font × 1.1 = 62 (rounded). Bottom anchor −300 − 62 = −362.
+        """
+        style = SubtitleStyle()
+        one_line = _title_position_value(style, 1080, line_count=1)
+        two_line = _title_position_value(style, 1080, line_count=2)
+        # 1-line is unchanged.
+        assert one_line == "0 -300"
+        # 2-line Y is strictly more negative (Motion's Y points up).
+        assert two_line == "0 -362"
+        # Shift equals exactly one line height, in raw pixels.
+        assert int(one_line.split()[1]) - int(two_line.split()[1]) == 62
+
+    def test_two_line_preserves_offset_y(self):
+        """The shift is relative to the existing ``offset_y`` — it
+        must not reset, double, or invert the user's tuning.
+
+        Bottom base is -300; with ``offset_y=-180`` a 1-line cue
+        sits at -480. The 2-line shift adds another line height
+        (-62) on top, landing at -542.
+        """
+        style = SubtitleStyle(offset_y=-180)
+        one_line = _title_position_value(style, 1080, line_count=1)
+        two_line = _title_position_value(style, 1080, line_count=2)
+        assert one_line == "0 -480"
+        assert two_line == "0 -542"  # -480 - 62
+
+    def test_three_line_lifts_by_two_line_heights(self):
+        """Max-lines can be up to 4 (see SubtitleStyle), so the shift
+        formula must scale with line_count, not stop at 2 lines.
+        """
+        style = SubtitleStyle()
+        one_line = _title_position_value(style, 1080, line_count=1)
+        three_line = _title_position_value(style, 1080, line_count=3)
+        # 56pt × 1.1 × (3-1) = 124 → -300 - 124 = -424
+        assert int(one_line.split()[1]) - int(three_line.split()[1]) == 124
+        assert three_line == "0 -424"
+
+    def test_top_position_lifts_in_opposite_direction(self):
+        """For top placement, the anchor is positive Y; lifting the
+        box further up (i.e. closer to the top) means *more* positive
+        Y, not less. This catches sign errors.
+
+        Top base is +300, and the lift subtracts from it (Y axis
+        points up): +300 − 62 = +238.
+        """
+        style = SubtitleStyle(position="top")
+        one_line = _title_position_value(style, 1080, line_count=1)
+        two_line = _title_position_value(style, 1080, line_count=2)
+        assert one_line == "0 300"
+        # 2-line cue: lifted by line_height (Y axis subtracts).
+        assert two_line == "0 238"
+        # Shift is still 62px, just in the negative direction.
+        assert int(one_line.split()[1]) - int(two_line.split()[1]) == 62
+
+    def test_center_position_also_lifts(self):
+        """Center-anchored 2-line cues have the same drop problem
+        (just from the other side); same shift rule applies.
+        """
+        style = SubtitleStyle(position="center")
+        one_line = _title_position_value(style, 1080, line_count=1)
+        two_line = _title_position_value(style, 1080, line_count=2)
+        assert one_line == "0 0"
+        # Center → up = negative Y.
+        assert two_line == "0 -62"
+
+    def test_line_height_scales_with_font_size(self):
+        """The shift should track ``font_size`` so a 96pt cue lifts
+        proportionally more than a 56pt cue (and a tiny 16pt cue
+        doesn't over-shift). 96 × 1.1 = 106.
+        """
+        big = SubtitleStyle(font_size=96)
+        small = SubtitleStyle(font_size=16)
+        big_two = _title_position_value(big, 1080, line_count=2)
+        small_two = _title_position_value(small, 1080, line_count=2)
+        # -300 - 106 = -406 ; -300 - 18 = -318
+        assert big_two == "0 -406"
+        assert small_two == "0 -318"
+
+    def test_zero_line_count_treated_as_one(self):
+        """Defensive: ``line_count=0`` should not produce a *negative*
+        shift. Treat as the no-op (single-line) case.
+        """
+        style = SubtitleStyle()
+        assert _title_position_value(style, 1080, line_count=0) == "0 -300"
+
+    def test_two_line_subtitle_in_emitted_xml_lifts(self):
+        """End-to-end: a 2-line ``SubtitleSegment`` in the pipeline
+        produces a ``<param name="Position">`` with the lifted Y,
+        while a 1-line sibling keeps the original Y. This is the
+        regression we actually care about.
+        """
+        media = _make_media()
+        cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+        subs = [
+            SubtitleSegment(start=1.0, end=2.0, text="one line"),
+            SubtitleSegment(start=3.0, end=4.0,
+                            text="first line\nsecond line"),
+        ]
+        xml = build_fcpxml(media, cuts, subtitles=subs,
+                           subtitle_style=SubtitleStyle())
+        root = ET.fromstring(xml)
+        titles = root.findall(".//spine/asset-clip/title")
+        assert len(titles) == 2
+        one_y = titles[0].find("param[@name='Position']").get("value")
+        two_y = titles[1].find("param[@name='Position']").get("value")
+        assert one_y == "0 -300"
+        assert two_y == "0 -362"
+
+    def test_offset_y_applies_to_both_line_counts_in_xml(self):
+        """End-to-end with the user's exact knob: ``offset_y=-180``.
+
+        Bottom base is -300, so with offset_y=-180 the 1-line cue
+        ends up at -480 and the 2-line cue at -542 (one line height
+        higher). The user's "−180" is the *delta* from base, not
+        an absolute Y, and the multi-line shift is layered on top
+        of whatever final position the user has tuned.
+        """
+        media = _make_media()
+        cuts = [CutSegment(source_in=0.0, source_out=10.0)]
+        subs = [
+            SubtitleSegment(start=1.0, end=2.0, text="hi"),
+            SubtitleSegment(start=3.0, end=4.0,
+                            text="first\nsecond"),
+        ]
+        xml = build_fcpxml(media, cuts, subtitles=subs,
+                           subtitle_style=SubtitleStyle(offset_y=-180))
+        root = ET.fromstring(xml)
+        one_y, two_y = (
+            t.find("param[@name='Position']").get("value")
+            for t in root.findall(".//spine/asset-clip/title")
+        )
+        assert one_y == "0 -480"
+        assert two_y == "0 -542"

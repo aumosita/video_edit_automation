@@ -186,7 +186,7 @@ WAV로 추출되고, 전사 완료 후 삭제됩니다(`--keep-audio`로 보존 
 | `--style-font` | `Apple SD Gothic Neo` | 폰트 패밀리 |
 | `--style-font-size` | `56` | 폰트 크기 (8–400) |
 | `--style-max-chars` | `42` | 한 줄 최대 글자 수 |
-| `--style-max-lines` | `2` | 최대 줄 수 (1–4) |
+| `--style-max-lines` | `2` | 최대 줄 수 (1–4). 2줄 이상으로 줄바꿈될 때마다, 마지막 줄이 사용자가 `--style-offset-y`로 잡은 위치에 오도록 박스 전체가 한 줄 높이만큼 위로 자동 보정됩니다. |
 | `--style-min-duration` | `0.8` | 최소 표시 시간 (초) |
 | `--style-max-duration` | `6.0` | 최대 표시 시간 (초) |
 

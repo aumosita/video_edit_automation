@@ -292,7 +292,7 @@ this full path is required for the override to bind.
 """
 
 
-def _title_position_value(subtitle_style, media_height):
+def _title_position_value(subtitle_style, media_height, line_count=1):
     """Return the ``"X Y"`` Position override for a title.
 
     Titles anchor at the frame center by default; Motion's Y axis
@@ -302,6 +302,23 @@ def _title_position_value(subtitle_style, media_height):
 
     ``subtitle_style.offset_y`` is added in raw pixels so the web form's
     fine-tune field nudges from the computed base.
+
+    ``line_count`` (1-indexed) shifts the box so that **multi-line cues
+    keep their *last* line on the original anchor** instead of letting
+    the lower half drop off-screen. The shift is computed as
+    ``(line_count - 1) * line_height`` because single-line cues must
+    stay exactly where the user tuned ``offset_y`` for — only the extra
+    lines contribute to the lift. Concretely, with bottom placement on
+    1080p and a 56pt font: a one-line cue sits at ``-300 + offset_y``;
+    a two-line cue sits at ``-300 + offset_y - 62`` (one line height
+    higher), so the second line lands on the same Y the user tuned
+    ``offset_y`` for.
+
+    Line height is approximated as ``font_size * 1.1``. That's a
+    safe value for sans-serif subtitle fonts (Apple SD Gothic Neo,
+    Helvetica, Arial, …); bold text on a 1080p timeline reads
+    naturally at this ratio. If a font needs a different ratio later
+    the call site can be extended without breaking this default.
     """
     base = {
         "bottom": -round(media_height * 0.278),
@@ -309,6 +326,11 @@ def _title_position_value(subtitle_style, media_height):
         "top": round(media_height * 0.278),
     }.get(subtitle_style.position, -round(media_height * 0.278))
     y = base + int(subtitle_style.offset_y)
+    if line_count > 1:
+        line_height = round(subtitle_style.font_size * 1.1)
+        # Subtract because Motion's Y axis points up: lifting the box
+        # visually = more negative Y.
+        y -= (line_count - 1) * line_height
     return f"0 {y}"
 
 
@@ -351,7 +373,6 @@ def _add_titles_to_clip(
     to build stable, unique ``text-style-def`` ids.
     """
     style_attrs = subtitle_style.to_text_style_xml_attrs()
-    position_value = _title_position_value(subtitle_style, media_height)
     for i, (sub, offset) in enumerate(subs):
         sub_dur = sub.end - sub.start
         remaining = (cut.source_out - cut.source_in) - offset
@@ -362,6 +383,15 @@ def _add_titles_to_clip(
         local = cut.source_in + offset
         uid = timeline_offset + offset
         style_id = f"ts{uid:.3f}-{i}".replace(".", "_").replace("-", "_")
+        # Count lines in the cue so 2-line subtitles get the upward
+        # shift that keeps their last line on the original anchor.
+        # ``_wrap_text`` joins lines with ``\n`` (see transcriber.py),
+        # so counting newlines is the right metric. An empty text
+        # never reaches here because we skipped it above.
+        line_count = sub.text.count("\n") + 1
+        position_value = _title_position_value(
+            subtitle_style, media_height, line_count=line_count,
+        )
         title = etree.SubElement(clip, "title")
         title.set("name", "Subtitle")
         # DTD requires ``ref`` on every <title> (points at the
