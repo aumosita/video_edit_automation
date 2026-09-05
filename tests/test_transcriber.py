@@ -74,12 +74,26 @@ def test_resolve_device_explicit_passthrough() -> None:
     assert resolve_device("cpu") == "cpu"
     assert resolve_device("cuda") == "cuda"
     assert resolve_device("mps") == "mps"
+    assert resolve_device("metal") == "metal"
 
 
-def test_resolve_device_auto_prefers_mps_then_cuda_then_cpu() -> None:
-    assert resolve_device("auto", has_cuda=True, has_mps=True) == "mps"
-    assert resolve_device("auto", has_cuda=True, has_mps=False) == "cuda"
-    assert resolve_device("auto", has_cuda=False, has_mps=False) == "cpu"
+def test_resolve_device_auto_prefers_metal_then_cuda_then_mps_then_cpu() -> None:
+    # Metal (whisper.cpp on Apple Silicon) wins because it is the only
+    # Apple GPU path that actually works: CTranslate2 rejects "mps".
+    assert resolve_device(
+        "auto", has_metal=True, has_cuda=True, has_mps=True
+    ) == "metal"
+    assert resolve_device(
+        "auto", has_metal=False, has_cuda=True, has_mps=True
+    ) == "cuda"
+    # No Metal binary and no CUDA, but torch reports MPS: fall through to
+    # "mps" so the caller's own routing can decide what to do with it.
+    assert resolve_device(
+        "auto", has_metal=False, has_cuda=False, has_mps=True
+    ) == "mps"
+    assert resolve_device(
+        "auto", has_metal=False, has_cuda=False, has_mps=False
+    ) == "cpu"
 
 
 def test_resolve_compute_type_explicit_passthrough() -> None:
@@ -91,6 +105,92 @@ def test_resolve_compute_type_auto() -> None:
     assert resolve_compute_type("cpu", "auto") == "int8"
     assert resolve_compute_type("cuda", "auto") == "float16"
     assert resolve_compute_type("mps", "auto") == "float16"
+    # whisper.cpp carries its quantisation in the ggml file, so the
+    # runtime compute type is nominal; int8 reflects the q5_0 default.
+    assert resolve_compute_type("metal", "auto") == "int8"
+
+
+# ---------------------------------------------------------------------------
+# Apple GPU backend routing
+# ---------------------------------------------------------------------------
+
+
+class TestMetalRouting:
+    """``transcribe`` must hand Metal/MPS work to the whisper.cpp backend.
+
+    CTranslate2 raises ``ValueError: unsupported device mps``, so the
+    faster-whisper path can never serve an Apple GPU request. Both
+    ``metal`` and ``mps`` therefore route to
+    :mod:`veauto.transcriber_whispercpp`.
+    """
+
+    def _spy(self, monkeypatch):
+        calls = {}
+
+        def fake(audio_path, config, **kwargs):
+            calls["audio_path"] = audio_path
+            calls["config"] = config
+            calls["kwargs"] = kwargs
+            return [Word(start=0.0, end=1.0, text="ok")]
+
+        monkeypatch.setattr(
+            "veauto.transcriber_whispercpp.transcribe", fake
+        )
+        return calls
+
+    def test_metal_routes_to_whispercpp(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        cfg = SubtitleConfig(device="metal", model="tiny")
+        out = transcribe("a.wav", cfg)
+        assert [w.text for w in out] == ["ok"]
+        assert calls["audio_path"] == "a.wav"
+
+    def test_mps_also_routes_to_whispercpp(self, monkeypatch):
+        # A Mac user reaching for "mps" gets the working GPU path
+        # instead of an "unsupported device" crash.
+        calls = self._spy(monkeypatch)
+        cfg = SubtitleConfig(device="mps", model="tiny")
+        transcribe("b.wav", cfg)
+        assert calls["audio_path"] == "b.wav"
+
+    def test_tuning_flags_are_forwarded(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        cfg = SubtitleConfig(device="metal", model="tiny")
+        transcribe("c.wav", cfg, vad_filter=False,
+                   condition_on_previous_text=False)
+        assert calls["kwargs"]["vad_filter"] is False
+        assert calls["kwargs"]["condition_on_previous_text"] is False
+
+    def test_cpu_does_not_route_to_whispercpp(self, monkeypatch):
+        def boom(*a, **kw):  # pragma: no cover - must not be called
+            raise AssertionError("whisper.cpp must not serve device=cpu")
+
+        monkeypatch.setattr(
+            "veauto.transcriber_whispercpp.transcribe", boom
+        )
+        cfg = SubtitleConfig(device="cpu", model="tiny")
+        out = transcribe(
+            "d.wav", cfg,
+            model_factory=lambda *a, **kw: _FakeWhisperModel([]),
+        )
+        assert out == []
+
+    def test_model_factory_overrides_metal_routing(self, monkeypatch):
+        # Tests inject a fake model; that must keep working even with
+        # device=metal, otherwise every faster-whisper test would be
+        # hijacked by the CLI backend on an Apple Silicon dev machine.
+        def boom(*a, **kw):  # pragma: no cover - must not be called
+            raise AssertionError("model_factory must win over routing")
+
+        monkeypatch.setattr(
+            "veauto.transcriber_whispercpp.transcribe", boom
+        )
+        cfg = SubtitleConfig(device="metal", model="tiny")
+        out = transcribe(
+            "e.wav", cfg,
+            model_factory=lambda *a, **kw: _FakeWhisperModel([]),
+        )
+        assert out == []
 
 
 # ---------------------------------------------------------------------------

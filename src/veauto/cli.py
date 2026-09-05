@@ -133,7 +133,10 @@ def subtitles(
     ),
     device: str = typer.Option(
         'auto', '--device',
-        help='Inference device (auto|cpu|cuda|mps).',
+        help='Inference device (auto|cpu|cuda|metal|mps). '
+             '"metal" uses the whisper.cpp Apple-GPU backend '
+             '(needs: brew install whisper-cpp); "mps" is a synonym '
+             'because CTranslate2 has no MPS backend of its own.',
     ),
     compute_type: str = typer.Option(
         'auto', '--compute-type',

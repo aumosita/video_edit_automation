@@ -360,7 +360,8 @@
             <option value="auto">auto</option>
             <option value="cpu">cpu</option>
             <option value="cuda">cuda</option>
-            <option value="mps">mps</option>
+            <option value="metal">metal (Apple GPU)</option>
+            <option value="mps">mps → metal</option>
           </select>
         </label>
         <label>Compute type

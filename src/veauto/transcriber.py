@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 from .models import SubtitleConfig, SubtitleSegment, Word
 
-DevicePreference = Literal["auto", "cpu", "cuda", "mps"]
+DevicePreference = Literal["auto", "cpu", "cuda", "mps", "metal"]
 ComputePreference = Literal["auto", "int8", "int8_float16", "float16", "float32"]
 
 # Minimum duration (seconds) any computed subtitle line is allowed to have.
@@ -126,28 +126,44 @@ def resolve_device(
     *,
     has_cuda: bool | None = None,
     has_mps: bool | None = None,
+    has_metal: bool | None = None,
 ) -> str:
-    """Resolve the ``device`` preference to a concrete faster-whisper device name.
+    """Resolve the ``device`` preference to a concrete backend device name.
 
     Parameters
     ----------
     device
-        ``"auto"`` prefers MPS (Apple Silicon) → CUDA → CPU; explicit values
-        pass through unchanged.
-    has_cuda / has_mps
-        Optional overrides for tests / exotic environments. When both are
-        ``None``, the function probes the live ``torch`` / platform.
+        ``"auto"`` prefers Metal (Apple Silicon, via whisper.cpp) → CUDA
+        → CPU; explicit values pass through unchanged.
+    has_cuda / has_mps / has_metal
+        Optional overrides for tests / exotic environments. When
+        ``None``, the function probes the live machine.
+
+    Notes
+    -----
+    ``auto`` deliberately prefers ``"metal"`` over ``"mps"`` on Apple
+    Silicon. ``mps`` would mean "ask CTranslate2 for the Metal
+    Performance Shaders backend", which does not exist — that is the
+    ``unsupported device mps`` failure. ``metal`` routes to whisper.cpp,
+    which does have a working ggml Metal backend. The old MPS probe is
+    kept for callers that ask for ``mps`` explicitly.
     """
     if device != "auto":
         return device
+    if has_metal is None:
+        has_metal = _probe_has_metal()
     if has_cuda is None:
         has_cuda = _probe_has_cuda()
     if has_mps is None:
         has_mps = _probe_has_mps()
-    if has_mps:
-        return "mps"
+    # Apple GPU first: on an M-series Mac it is the only real
+    # accelerator, and the whisper.cpp path measurably beats CPU.
+    if has_metal:
+        return "metal"
     if has_cuda:
         return "cuda"
+    if has_mps:
+        return "mps"
     return "cpu"
 
 
@@ -170,6 +186,27 @@ def _probe_has_mps() -> bool:
         return False
 
 
+def _probe_has_metal() -> bool:
+    """Whether the whisper.cpp Metal path is usable on this machine.
+
+    Two things have to hold: an Apple Silicon host (Metal on Intel Macs
+    is not built by the Homebrew ggml formula), and the ``whisper-cli``
+    binary being installed. Both are cheap to check and neither imports
+    a heavy dependency.
+    """
+    import platform
+
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        from .transcriber_whispercpp import find_whisper_cli
+
+        find_whisper_cli()
+        return True
+    except Exception:
+        return False
+
+
 def resolve_compute_type(device: str, compute_type: ComputePreference) -> str:
     """Resolve the ``compute_type`` preference.
 
@@ -177,10 +214,16 @@ def resolve_compute_type(device: str, compute_type: ComputePreference) -> str:
 
     - ``"auto"`` → ``"float16"`` on GPU/MPS, ``"int8"`` on CPU.
     - Explicit values pass through.
+
+    ``metal`` is a no-op here: quantisation for the whisper.cpp backend
+    is baked into the chosen ggml file (see
+    :data:`veauto.transcriber_whispercpp._MODEL_FILES`), not passed at
+    runtime. The value is reported as ``"int8"`` because the default
+    ggml mapping uses q5_0/q8 weights.
     """
     if compute_type != "auto":
         return compute_type
-    if device == "cpu":
+    if device in ("cpu", "metal"):
         return "int8"
     return "float16"
 
@@ -487,6 +530,28 @@ def transcribe(
       that bites long videos.
     """
     device = resolve_device(config.device)
+
+    # ---- Apple GPU routing -------------------------------------------
+    # CTranslate2 (which faster-whisper wraps) has no Metal/MPS backend
+    # and raises ``ValueError: unsupported device mps``, so on Apple
+    # Silicon the only way to actually use the GPU is the whisper.cpp
+    # CLI, whose ggml Metal backend Homebrew builds for arm64.
+    #
+    # ``metal`` asks for that backend explicitly. ``mps`` is treated as
+    # a synonym rather than an error: it is what a user reaches for on a
+    # Mac, and failing with "unsupported device" when a working GPU path
+    # exists would be needlessly hostile. ``model_factory`` overrides
+    # this (tests inject a fake and must keep the faster-whisper path).
+    if device in ("metal", "mps") and model_factory is None:
+        from . import transcriber_whispercpp as _wcpp
+
+        return _wcpp.transcribe(
+            audio_path,
+            config,
+            vad_filter=vad_filter,
+            condition_on_previous_text=condition_on_previous_text,
+        )
+
     compute_type = resolve_compute_type(device, config.compute_type)
     factory = model_factory or _default_model_factory
     model = factory(config.model, device, compute_type)

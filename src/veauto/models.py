@@ -280,7 +280,7 @@ class SubtitleConfig(BaseModel):
         default=None,
         description="ISO 639-1 code (e.g. 'ko', 'en'). None = auto-detect.",
     )
-    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
+    device: Literal["auto", "cpu", "cuda", "mps", "metal"] = "auto"
     compute_type: Literal["auto", "int8", "int8_float16", "float16", "float32"] = "auto"
     beam_size: int = Field(default=5, ge=1, le=20)
     offset: float = Field(

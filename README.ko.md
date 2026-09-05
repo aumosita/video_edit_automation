@@ -174,7 +174,7 @@ WAV로 추출되고, 전사 완료 후 삭제됩니다(`--keep-audio`로 보존 
 | --- | --- | --- |
 | `--model` | `medium` | faster-whisper 모델: `tiny` / `base` / `small` / `medium` / `large-v3` / `distil-large-v3` |
 | `--language` | *(자동)* | ISO 639-1 코드 (`ko`, `en`, …). 미지정 시 자동 감지 |
-| `--device` | `auto` | `auto` / `cpu` / `cuda` / `mps` |
+| `--device` | `auto` | `auto` / `cpu` / `cuda` / `metal` / `mps`. `metal`은 Apple Silicon에서 whisper.cpp의 Metal GPU 백엔드를 사용 (M1에서 large-v3 FP16 약 2.6× 실시간). `mps`는 `metal`의 동의어 (CTranslate2가 MPS를 지원하지 않으므로). |
 | `--compute-type` | `auto` | `auto` / `int8` / `int8_float16` / `float16` / `float32` |
 | `--beam-size` | `5` | 빔 서치 크기 (1–20) |
 
