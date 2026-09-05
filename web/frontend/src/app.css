@@ -168,6 +168,59 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .row-failed  td:first-child { box-shadow: inset 3px 0 0 0 var(--danger); }
 .row-cancelled td:first-child { box-shadow: inset 3px 0 0 0 var(--cancelled); }
 
+/* Progress cell: percentage (and current stage) sits above the bar so
+ * the number is readable at a glance instead of squeezed beside it. */
+.cell-progress { min-width: 110px; }
+.pct-row {
+  display: flex; align-items: baseline; gap: 6px;
+  margin-bottom: 3px; line-height: 1;
+}
+.pct-label {
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: 11px; font-weight: 600; color: var(--text);
+}
+.stage-label { font-size: 10px; color: var(--text-dim); }
+
+/* Speed column: average speed on top, last-60s speed and ETA below. */
+.cell-speed { white-space: nowrap; }
+.speed-main {
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: 11px; color: var(--text);
+}
+.speed-sub { font-size: 10px; color: var(--text-dim); }
+
+/* Jobs heading row keeps the "Clear all" action on the same line. */
+.jobs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.jobs-head h2 { margin-bottom: 8px; }
+
+/* Expandable details row: stats grid + download links + error block. */
+.cell-detail { font-size: 12px; }
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px 14px;
+  margin-bottom: 10px;
+}
+.detail-grid .stat { display: flex; flex-direction: column; gap: 1px; }
+.detail-grid .k {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.detail-grid .v {
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: 12px; color: var(--text);
+}
+.detail-links { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+
+/* Transient notice shown after a job's settings are restored. */
+.notice {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  padding: 0.5rem 0.8rem;
+  border-radius: 4px;
+  margin: 0.6rem 0;
+}
+
 /* Expandable error details row. The traceback is shown in a fixed-
  * height, scrollable block so very long stacks don't push the rest of
  * the table around. */

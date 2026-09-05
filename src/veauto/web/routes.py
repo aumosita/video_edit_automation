@@ -100,6 +100,19 @@ async def get_job(job_id: str) -> JobRecord:
     return rec.with_download_urls()
 
 
+@router.delete("/jobs", status_code=200)
+async def clear_jobs() -> dict:
+    """Delete **all** jobs (records + artifacts).
+
+    This is the explicit "Clear all" action in the UI. Individual job
+    records are normally kept across restarts, so without this endpoint
+    there would be no way to empty the table.
+    """
+    mgr = _manager()
+    removed = mgr.clear()
+    return {"deleted": removed}
+
+
 @router.delete("/jobs/{job_id}", status_code=204)
 async def cancel_job(job_id: str) -> None:
     """Cancel a running job and remove it from the manager.

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import threading
 import time
 import traceback as _tb
@@ -98,6 +99,11 @@ class JobManager:
     ) -> None:
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
+        # On-disk index of every job record so the job table survives a
+        # server restart / upgrade. Artifacts (fcpxml / report / srt)
+        # already live under ``output_root/<job_id>/``; this file only
+        # stores the metadata needed to list and re-download them.
+        self._index_path = self.output_root / "jobs.json"
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="veauto-job"
         )
@@ -108,6 +114,7 @@ class JobManager:
         # "job.delete" events.
         self._global_subscribers: list[_Subscriber] = []
         self._on_job_done = on_job_done
+        self._load_index()
 
     def submit(
         self,
@@ -138,6 +145,7 @@ class JobManager:
         )
         with self._lock:
             self._jobs[job_id] = job
+        self._persist()
         job.future = self._executor.submit(self._run_job, job)
         logger.info("Job %s queued (%s, %d bytes)", job_id, input_name, input_size)
         # Return a deep copy so the caller's snapshot is decoupled from
@@ -227,8 +235,93 @@ class JobManager:
                 pass
         # Tell global subscribers.
         self._broadcast_global({"type": "job.deleted", "id": job_id})
+        self._persist()
         logger.info("Job %s deleted", job_id)
         return True
+
+    def clear(self) -> int:
+        """Delete every job (records + artifacts). Returns the count."""
+        with self._lock:
+            jobs = list(self._jobs.values())
+            self._jobs.clear()
+        for job in jobs:
+            job.cancel_event.set()
+            shutil.rmtree(job.output_dir, ignore_errors=True)
+        self._persist()
+        self._broadcast_global({"type": "jobs.cleared"})
+        logger.info("Cleared %d job(s)", len(jobs))
+        return len(jobs)
+
+    # ------------------------------------------------------------------
+    # Persistence (job index on disk)
+    # ------------------------------------------------------------------
+
+    def _persist(self) -> None:
+        """Write the job index to ``output_root/jobs.json``.
+
+        Failures are logged and swallowed: persistence is a convenience,
+        and a read-only or full disk must never break a running job.
+        """
+        with self._lock:
+            records = [j.record for j in self._jobs.values()]
+            payload = [
+                r.model_dump(mode="json") for r in records
+            ]
+        try:
+            tmp = self._index_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "jobs": payload}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(self._index_path)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to persist job index")
+
+    def _load_index(self) -> None:
+        """Restore the job table from ``output_root/jobs.json``.
+
+        Jobs that were ``queued`` or ``running`` when the server last
+        stopped can no longer make progress, so they are shown as
+        ``cancelled`` ("interrupted by restart") instead of hanging
+        forever in the UI. A missing or corrupt index just means an
+        empty job table.
+        """
+        if not self._index_path.exists():
+            return
+        try:
+            raw = json.loads(self._index_path.read_text(encoding="utf-8"))
+            entries = raw.get("jobs", []) if isinstance(raw, dict) else raw
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not read job index; starting empty")
+            return
+
+        restored = 0
+        for entry in entries:
+            try:
+                record = JobRecord.model_validate(entry)
+            except Exception:  # noqa: BLE001
+                logger.warning("Skipping unparsable job entry in index")
+                continue
+            if record.status in ("queued", "running"):
+                record.status = "cancelled"
+                record.error_kind = "cancelled"  # type: ignore[assignment]
+                record.error = "Interrupted by server restart"
+                record.message = "Interrupted by server restart"
+                record.stage = "interrupted"
+            job_dir = self.output_root / record.id
+            input_path = (
+                job_dir / record.input_name
+                if (job_dir / record.input_name).exists()
+                else job_dir
+            )
+            self._jobs[record.id] = _Job(
+                record=record,
+                input_path=input_path,
+                output_dir=job_dir,
+            )
+            restored += 1
+        if restored:
+            logger.info("Restored %d job(s) from index", restored)
 
     def unsubscribe(self, job_id: str, sub: _Subscriber) -> None:
         with self._lock:
@@ -659,3 +752,5 @@ class JobManager:
         self._broadcast_global(
             {"type": "job.update", "job": snapshot_json}
         )
+        # Keep the on-disk index in sync so a restart restores this state.
+        self._persist()

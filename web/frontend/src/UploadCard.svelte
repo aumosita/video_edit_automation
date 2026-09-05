@@ -125,6 +125,85 @@
   function resetToDefaults() {
     opts = { ...DEFAULTS };
     saveOptions({ ...DEFAULTS });
+    loadedFrom = "";
+  }
+
+  // Re-populate the form from a previous job's options (JobOptions JSON
+  // as returned by the API). Any field the record doesn't carry falls
+  // back to the built-in default. The usual validation on load applies,
+  // and saving happens through the existing auto-save effect, so the
+  // restored settings survive a reload like any other edit.
+  let loadedFrom = $state("");
+
+  export function applySettings(jobOptions = {}, sourceName = "") {
+    const next = { ...DEFAULTS };
+    const map = {
+      model: "model",
+      language: "language",
+      device: "device",
+      compute_type: "computeType",
+      noise_db: "noiseDb",
+      noise_db_offset: "noiseDbOffset",
+      min_silence: "minSilence",
+      margin: "margin",
+      min_keep_seconds: "minKeepSeconds",
+      no_silence: "noSilence",
+      subtitle_target: "subtitleTarget",
+      style_position: "stylePosition",
+      style_font: "styleFont",
+      style_font_size: "styleFontSize",
+      style_bold: "styleBold",
+      style_color: "styleColor",
+      style_offset_y: "styleOffsetY",
+      style_template: "styleTemplate",
+      subtitle_offset: "subtitleOffset",
+      style_max_chars: "maxCharsPerLine",
+      style_max_lines: "maxLines",
+      style_split_sentence: "splitSentence",
+      project_name: "projectName",
+      event_name: "eventName",
+    };
+    for (const [srcKey, dstKey] of Object.entries(map)) {
+      const v = jobOptions[srcKey];
+      if (v === undefined || v === null) continue;
+      const def = DEFAULTS[dstKey];
+      if (typeof def === "boolean") {
+        if (typeof v === "boolean") next[dstKey] = v;
+      } else if (typeof def === "number") {
+        const n = Number(v);
+        if (Number.isFinite(n)) next[dstKey] = n;
+      } else if (typeof v === "string" && v !== "") {
+        next[dstKey] = v;
+      }
+    }
+    // auto_noise_db selects the threshold mode.
+    if (typeof jobOptions.auto_noise_db === "boolean") {
+      next.thresholdMode = jobOptions.auto_noise_db ? "auto" : "fixed";
+    }
+    // Legacy records used the no_subtitles boolean instead of a target.
+    if (
+      jobOptions.subtitle_target == null
+      && typeof jobOptions.no_subtitles === "boolean"
+      && jobOptions.no_subtitles
+    ) {
+      next.subtitleTarget = "none";
+    }
+    // Enum fields must still be valid after the round-trip.
+    if (!SUBTITLE_TARGETS.some((t) => t.v === next.subtitleTarget)) {
+      next.subtitleTarget = DEFAULTS.subtitleTarget;
+    }
+    if (next.thresholdMode !== "auto" && next.thresholdMode !== "fixed") {
+      next.thresholdMode = DEFAULTS.thresholdMode;
+    }
+    if (!["bottom", "center", "top"].includes(next.stylePosition)) {
+      next.stylePosition = DEFAULTS.stylePosition;
+    }
+    if (!["text", "lower_third"].includes(next.styleTemplate)) {
+      next.styleTemplate = DEFAULTS.styleTemplate;
+    }
+    opts = next;
+    loadedFrom = sourceName ? `Loaded settings from ${sourceName}` : "Loaded settings";
+    setTimeout(() => { loadedFrom = ""; }, 4000);
   }
 
   async function refreshModels() {
@@ -337,6 +416,10 @@
         </label>
       </div>
     </details>
+
+    {#if loadedFrom}
+      <p class="notice">{loadedFrom}</p>
+    {/if}
 
     {#if error}
       <p class="error">{error}</p>

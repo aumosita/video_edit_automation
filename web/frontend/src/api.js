@@ -30,6 +30,7 @@ export const api = {
   getJob: (id) => request(`/api/jobs/${id}`),
   cancelJob: (id) => request(`/api/jobs/${id}`, { method: "DELETE" }),
   deleteJob: (id) => request(`/api/jobs/${id}`, { method: "DELETE" }),
+  clearJobs: () => request("/api/jobs", { method: "DELETE" }),
   defaultOptions: () => request("/api/config/defaults"),
   listModels: async () => {
     const r = await request("/api/config/models");
@@ -41,7 +42,7 @@ export const api = {
 };
 
 // Named re-exports for convenience
-export const { health, listJobs, getJob, cancelJob, deleteJob, defaultOptions, listModels } = api;
+export const { health, listJobs, getJob, cancelJob, deleteJob, clearJobs, defaultOptions, listModels } = api;
 
 /** Open a WebSocket to ``/api/ws/jobs/{id}`` (per-job). Returns the raw WebSocket. */
 export function openJobSocket(jobId) {

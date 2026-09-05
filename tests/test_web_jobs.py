@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 
@@ -86,6 +87,104 @@ class TestJobLifecycle:
 
     def test_get_unknown_returns_none(self, manager: JobManager):
         assert manager.get("nope") is None
+
+    def test_index_written_on_submit(self, manager: JobManager, tmp_path: Path):
+        v = _write_dummy_video(tmp_path)
+        loop = asyncio.new_event_loop()
+        try:
+            manager.submit(
+                input_path=v,
+                input_name="x.mp4",
+                input_size=1,
+                options=JobOptions(model="small", language="ko"),
+                loop=loop,
+            )
+        finally:
+            loop.close()
+        index = tmp_path / "jobs.json"
+        assert index.exists()
+        data = json.loads(index.read_text(encoding="utf-8"))
+        assert len(data["jobs"]) == 1
+
+    def test_index_restored_across_restart(self, tmp_path: Path):
+        # Simulate a server restart: submit, throw the manager away,
+        # construct a new one over the same output root.
+        v = _write_dummy_video(tmp_path)
+        loop = asyncio.new_event_loop()
+        try:
+            m1 = JobManager(output_root=tmp_path, max_workers=2)
+            rec = m1.submit(
+                input_path=v,
+                input_name="persisted.mp4",
+                input_size=1,
+                options=JobOptions(model="medium", language="en"),
+                loop=loop,
+            )
+        finally:
+            loop.close()
+
+        m2 = JobManager(output_root=tmp_path, max_workers=2)
+        restored = m2.get(rec.id)
+        assert restored is not None
+        assert restored.input_name == "persisted.mp4"
+        assert restored.options.model == "medium"
+        assert restored.options.language == "en"
+
+    def test_running_job_marked_interrupted_on_restart(self, tmp_path: Path):
+        index = tmp_path / "jobs.json"
+        index.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "jobs": [
+                        {
+                            "id": "abc123",
+                            "status": "running",
+                            "created_at": "2024-01-01T00:00:00+00:00",
+                            "started_at": "2024-01-01T00:00:01+00:00",
+                            "input_name": "in.mp4",
+                            "input_size": 10,
+                            "options": {},
+                            "progress": 0.4,
+                            "stage": "transcribe",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        m = JobManager(output_root=tmp_path, max_workers=2)
+        rec = m.get("abc123")
+        assert rec is not None
+        assert rec.status == "cancelled"
+        assert rec.error == "Interrupted by server restart"
+        assert rec.stage == "interrupted"
+
+    def test_corrupt_index_starts_empty(self, tmp_path: Path):
+        (tmp_path / "jobs.json").write_text("{not json", encoding="utf-8")
+        m = JobManager(output_root=tmp_path, max_workers=2)
+        assert m.list_jobs() == []
+
+    def test_clear_removes_jobs_and_artifacts(self, manager: JobManager, tmp_path: Path):
+        loop = asyncio.new_event_loop()
+        try:
+            for i in range(3):
+                v = _write_dummy_video(tmp_path, name=f"c{i}.mp4")
+                manager.submit(
+                    input_path=v,
+                    input_name=v.name,
+                    input_size=1,
+                    options=JobOptions(),
+                    loop=loop,
+                )
+        finally:
+            loop.close()
+        removed = manager.clear()
+        assert removed == 3
+        assert manager.list_jobs() == []
+        # The index is emptied too, so a restart stays empty.
+        data = json.loads((tmp_path / "jobs.json").read_text(encoding="utf-8"))
+        assert data["jobs"] == []
 
     def test_job_dir_created(self, manager: JobManager, tmp_path: Path):
         v = _write_dummy_video(tmp_path)

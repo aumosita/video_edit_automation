@@ -1,22 +1,48 @@
 <script>
   import { onMount, onDestroy } from "svelte";
   import UploadCard from "./UploadCard.svelte";
-  import { listJobs, cancelJob, deleteJob, openGlobalSocket } from "./api.js";
+  import { listJobs, cancelJob, deleteJob, clearJobs, openGlobalSocket } from "./api.js";
 
   let jobs = $state([]);
   let ws = null;
   let reconnectTimer = null;
   let pollTimer = null;
-  // Per-job toggle for the expanded error details row. Using a Set
-  // keeps each row's expand state independent of WS re-renders.
-  let expandedErrors = $state(new Set());
+  // Per-job toggle for the expanded details row (stats + downloads +
+  // error). Using a Set keeps each row's expand state independent of
+  // WS re-renders.
+  let expandedRows = $state(new Set());
+  let uploadCard = null;
 
-  function toggleError(id) {
+  function toggleDetails(id) {
     // Reassign a fresh Set so Svelte's reactivity picks up the change.
-    const next = new Set(expandedErrors);
+    const next = new Set(expandedRows);
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    expandedErrors = next;
+    expandedRows = next;
+  }
+
+  // Progress history per job (in-memory only). Used to derive the
+  // "last minute" processing speed. Progress updates arrive as steps
+  // (per pipeline stage), so a raw instantaneous slope just flickers;
+  // a 60-second window smooths it out.
+  let progressSamples = new Map(); // jobId -> [{ t: ms, p: 0..1 }]
+  const SAMPLE_WINDOW_MS = 60_000;
+
+  function recordSample(job) {
+    if (typeof job.progress !== "number" || !job.started_at) return;
+    let samples = progressSamples.get(job.id);
+    if (!samples) {
+      samples = [];
+      progressSamples.set(job.id, samples);
+    }
+    const last = samples[samples.length - 1];
+    // Only record actual changes so a busy message stream doesn't
+    // fill the buffer with identical points.
+    if (last && last.p === job.progress && Date.now() - last.t < 5000) return;
+    samples.push({ t: Date.now(), p: job.progress });
+    // Keep ~2 minutes of history.
+    const cutoff = Date.now() - 2 * SAMPLE_WINDOW_MS;
+    while (samples.length && samples[0].t < cutoff) samples.shift();
   }
 
   onMount(async () => {
@@ -32,7 +58,9 @@
 
   async function refresh() {
     try {
-      jobs = await listJobs();
+      const list = await listJobs();
+      jobs = list;
+      for (const j of list) recordSample(j);
     } catch (e) {
       console.error("listJobs failed:", e);
     }
@@ -56,6 +84,7 @@
             // Replace the whole table with the server's truth. Using
             // upsert (per-row) would leave deleted rows alive.
             jobs = Array.isArray(msg.jobs) ? msg.jobs : [];
+            for (const j of jobs) recordSample(j);
           } else if (msg.type === "list") {
             // Legacy message shape; kept for backward compat.
             jobs = Array.isArray(msg.jobs) ? msg.jobs : [];
@@ -99,6 +128,7 @@
   }
 
   function upsertJob(job) {
+    recordSample(job);
     const idx = jobs.findIndex((j) => j.id === job.id);
     if (idx === -1) jobs = [job, ...jobs];
     else {
@@ -161,6 +191,84 @@
       : now;
     return Math.max(0, (end - start) / 1000);
   }
+
+  // Processing speed, expressed as a realtime multiplier: 2.0× means
+  // two seconds of source media are handled per wall-clock second.
+  // ``sourceSeconds`` = how much of the source has been processed.
+  function sourceSecondsDone(job, at) {
+    if (job.input_duration == null) return null;
+    return (job.progress || 0) * job.input_duration;
+  }
+  function avgSpeed(job) {
+    const el = elapsed(job);
+    if (el == null || el <= 0.5) return null;
+    const done = job.status === "completed"
+      ? job.input_duration ?? null
+      : sourceSecondsDone(job);
+    if (done == null) return null;
+    return done / el;
+  }
+  // Speed measured over the last ~60s of progress samples. Returns null
+  // until a minute of history exists (or for finished jobs, where the
+  // average is the meaningful number).
+  function recentSpeed(job) {
+    if (job.status !== "running") return null;
+    const samples = progressSamples.get(job.id);
+    if (!samples || samples.length < 2) return null;
+    const latest = samples[samples.length - 1];
+    const base = samples.find((s) => latest.t - s.t <= SAMPLE_WINDOW_MS)
+      ?? samples[0];
+    const dt = (latest.t - base.t) / 1000;
+    if (dt < 30) return null; // need at least half a minute of history
+    const dp = latest.p - base.p;
+    if (dp <= 0) return null;
+    if (job.input_duration == null) return null;
+    return (dp * job.input_duration) / dt;
+  }
+  function fmtSpeed(x) {
+    if (x == null || !Number.isFinite(x)) return "—";
+    return `${x.toFixed(1)}×`;
+  }
+  // %/minute fallback when the source duration is unknown.
+  function pctPerMin(job) {
+    const el = elapsed(job);
+    if (el == null || el <= 0.5 || job.input_duration != null) return null;
+    return ((job.progress || 0) * 100 * 60) / el;
+  }
+  function etaSeconds(job) {
+    if (job.status !== "running") return null;
+    const speed = avgSpeed(job);
+    if (!speed || speed <= 0) return null;
+    const remaining = job.input_duration != null
+      ? (job.input_duration - sourceSecondsDone(job)) / speed
+      : (1 - (job.progress || 0)) / (speed || 1);
+    return remaining > 0 ? remaining : null;
+  }
+  function fmtDurationShort(secs) {
+    if (secs == null) return "";
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  function useSettings(job) {
+    if (uploadCard && typeof uploadCard.applySettings === "function") {
+      uploadCard.applySettings(job.options || {}, job.input_name);
+    }
+  }
+
+  async function onClearAll() {
+    if (jobs.length === 0) return;
+    const ok = typeof confirm === "function"
+      ? confirm(`Delete all ${jobs.length} job(s) and their output files?`)
+      : true;
+    if (!ok) return;
+    try {
+      await clearJobs();
+      jobs = [];
+      expandedRows = new Set();
+    } catch (e) { console.error("clearAll failed:", e); }
+  }
 </script>
 
 <header class="topbar">
@@ -175,10 +283,17 @@
 </header>
 
 <main>
-  <UploadCard onSubmitted={onSubmitted} />
+  <UploadCard bind:this={uploadCard} onSubmitted={onSubmitted} />
 
   <section class="jobs">
-    <h2>Jobs <span class="count">({jobs.length})</span></h2>
+    <div class="jobs-head">
+      <h2>Jobs <span class="count">({jobs.length})</span></h2>
+      {#if jobs.length > 0}
+        <div class="actions">
+          <button class="link danger" onclick={onClearAll}>Clear all</button>
+        </div>
+      {/if}
+    </div>
 
     {#if jobs.length === 0}
       <p class="empty">No jobs yet. Upload a video to get started.</p>
@@ -189,11 +304,7 @@
             <th>Input</th>
             <th>Status</th>
             <th>Progress</th>
-            <th>Silences</th>
-            <th>Words</th>
-            <th>Subs</th>
-            <th>Kept</th>
-            <th>Removed</th>
+            <th>Speed</th>
             <th>Started</th>
             <th>Elapsed</th>
             <th>Actions</th>
@@ -204,65 +315,98 @@
             <tr class="row-{statusClass(job.status)}">
               <td class="cell-name" title={job.input_name}>{job.input_name}</td>
               <td><span class="badge badge-{statusClass(job.status)}">{job.status}</span></td>
-              <td>
+              <td class="cell-progress">
+                <!-- Percent label sits above the bar; the current stage
+                     rides along on the same line. -->
+                <div class="pct-row">
+                  <span class="pct-label">{Math.round((job.progress || 0) * 100)}%</span>
+                  {#if job.stage && job.status !== "completed" && job.stage !== "queued"}
+                    <span class="stage-label">{job.stage}</span>
+                  {/if}
+                </div>
                 <div class="progress">
-                  <div class="bar" style="width: {Math.round((job.progress || 0) * 100)}%"></div>
-                  <span class="pct">{Math.round((job.progress || 0) * 100)}%</span>
+                  <div
+                    class="bar {statusClass(job.status)}"
+                    style="width: {Math.round((job.progress || 0) * 100)}%"
+                  ></div>
                 </div>
               </td>
-              <td>{job.num_silences ?? "—"}</td>
-              <td>{job.num_words ?? "—"}</td>
-              <td>{job.num_subtitles ?? "—"}</td>
-              <td>{fmtDuration(job.kept_duration)}</td>
-              <td>{fmtDuration(job.removed_duration)}</td>
-              <td class="cell-time">{shortTime(job.started_at)}</td>
-              <td class="cell-time cell-elapsed">
+              <td class="cell-speed">
+                <div class="speed-main">
+                  {#if job.input_duration == null && pctPerMin(job) != null}
+                    {pctPerMin(job).toFixed(0)}%/min
+                  {:else}
+                    {fmtSpeed(avgSpeed(job))}
+                  {/if}
+                </div>
                 {#if job.status === "running"}
-                  {fmtDuration(elapsed(job))}{job.stage ? ` · ${job.stage}` : ""}
-                {:else}
-                  {fmtDuration(elapsed(job))}
+                  {#if recentSpeed(job) != null}
+                    <div class="speed-sub">last 60s {fmtSpeed(recentSpeed(job))}</div>
+                  {/if}
+                  {#if etaSeconds(job) != null}
+                    <div class="speed-sub">ETA {fmtDurationShort(etaSeconds(job))}</div>
+                  {/if}
                 {/if}
               </td>
+              <td class="cell-time">{shortTime(job.started_at)}</td>
+              <td class="cell-time">{fmtDuration(elapsed(job))}</td>
               <td class="cell-actions">
+                <button class="link" onclick={() => toggleDetails(job.id)}>
+                  {expandedRows.has(job.id) ? "Hide" : "Details"}
+                </button>
                 {#if job.status === "queued" || job.status === "running"}
                   <button class="link danger" onclick={() => onCancel(job.id)}>Cancel</button>
                 {/if}
-                {#if job.fcpxml_url}
-                  <a class="link" href={job.fcpxml_url} target="_blank" rel="noopener">.fcpxml</a>
-                {/if}
-                {#if job.report_md_url}
-                  <a class="link" href={job.report_md_url} target="_blank" rel="noopener">.md</a>
-                {/if}
-                {#if job.report_json_url}
-                  <a class="link" href={job.report_json_url} target="_blank" rel="noopener">.json</a>
-                {/if}
-                {#if job.srt_url}
-                  <a class="link" href={job.srt_url} target="_blank" rel="noopener">.srt</a>
-                {/if}
-                {#if job.error_log_url}
-                  <a class="link danger" href={job.error_log_url} target="_blank" rel="noopener">log</a>
-                {/if}
-                {#if (job.status === "failed" || job.status === "cancelled") && (job.error || job.error_traceback)}
-                  <button class="link" onclick={() => toggleError(job.id)}>
-                    {expandedErrors.has(job.id) ? "Hide" : "Details"}
-                  </button>
-                {/if}
+                <button class="link" onclick={() => useSettings(job)}>Use settings</button>
                 <button class="link danger" onclick={() => onDelete(job.id)}>Delete</button>
               </td>
             </tr>
-            {#if (job.status === "failed" || job.status === "cancelled") && expandedErrors.has(job.id) && (job.error || job.error_traceback)}
+            {#if expandedRows.has(job.id)}
               <tr class="row-detail row-{statusClass(job.status)}">
-                <td colspan="11" class="cell-error">
-                  <div class="err-head">
-                    <strong>{job.error_kind === "cancelled" ? "Cancelled" : "Failed"}</strong>
-                    {#if job.error_stage}<span class="err-stage">stage: {job.error_stage}</span>{/if}
-                    {#if job.error_kind}<span class="err-kind">{job.error_kind}</span>{/if}
+                <td colspan="7" class="cell-detail">
+                  <div class="detail-grid">
+                    <div class="stat"><span class="k">Silences</span><span class="v">{job.num_silences ?? "—"}</span></div>
+                    <div class="stat"><span class="k">Cuts</span><span class="v">{job.num_cuts ?? "—"}</span></div>
+                    <div class="stat"><span class="k">Words</span><span class="v">{job.num_words ?? "—"}</span></div>
+                    <div class="stat"><span class="k">Subtitles</span><span class="v">{job.num_subtitles ?? "—"}</span></div>
+                    <div class="stat"><span class="k">Kept</span><span class="v">{fmtDuration(job.kept_duration)}</span></div>
+                    <div class="stat"><span class="k">Removed</span><span class="v">{fmtDuration(job.removed_duration)}</span></div>
+                    <div class="stat"><span class="k">Source</span><span class="v">{fmtDuration(job.input_duration)}</span></div>
+                    <div class="stat"><span class="k">Size</span><span class="v">{job.input_size != null ? (job.input_size / 1048576).toFixed(1) + " MB" : "—"}</span></div>
                   </div>
-                  {#if job.error}
-                    <div class="err-summary">{job.error}</div>
-                  {/if}
-                  {#if job.error_traceback}
-                    <pre class="err-trace">{job.error_traceback}</pre>
+
+                  <div class="detail-links">
+                    {#if job.fcpxml_url}
+                      <a class="link" href={job.fcpxml_url} target="_blank" rel="noopener">.fcpxml</a>
+                    {/if}
+                    {#if job.srt_url}
+                      <a class="link" href={job.srt_url} target="_blank" rel="noopener">.srt</a>
+                    {/if}
+                    {#if job.report_md_url}
+                      <a class="link" href={job.report_md_url} target="_blank" rel="noopener">report.md</a>
+                    {/if}
+                    {#if job.report_json_url}
+                      <a class="link" href={job.report_json_url} target="_blank" rel="noopener">report.json</a>
+                    {/if}
+                    {#if job.error_log_url}
+                      <a class="link danger" href={job.error_log_url} target="_blank" rel="noopener">log</a>
+                    {/if}
+                  </div>
+
+                  {#if job.error || job.error_traceback}
+                    <div class="cell-error">
+                      <div class="err-head">
+                        <strong>{job.error_kind === "cancelled" ? "Cancelled" : "Failed"}</strong>
+                        {#if job.error_stage}<span class="err-stage">stage: {job.error_stage}</span>{/if}
+                        {#if job.error_kind}<span class="err-kind">{job.error_kind}</span>{/if}
+                      </div>
+                      {#if job.error}
+                        <div class="err-summary">{job.error}</div>
+                      {/if}
+                      {#if job.error_traceback}
+                        <pre class="err-trace">{job.error_traceback}</pre>
+                      {/if}
+                    </div>
                   {/if}
                 </td>
               </tr>
